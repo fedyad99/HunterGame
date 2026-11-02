@@ -150,15 +150,15 @@ func _server_start() -> void:
 	for k in ["canned_food", "canned_food", "water_bottle", "water_bottle", "water_bottle", "bandage", "cigarettes", "beer", "firewood"]:
 		spawn_item(k, shelf + Vector3(randf_range(-1.5, 1.5), randf_range(0, 0.5), randf_range(-0.3, 0.3)), Vector3.ZERO, 10.0 if k == "cigarettes" else 1.0)
 	spawn_item("jerrycan", c + Vector3(9.0, 0.5, -7.5))
-	_register(1, Net.nick)
+	_register(1, Net.nick, Net.look.to_string_code())
 	hud.add_msg(T.t("msg_hosting", [Net.port]))
 
 
-func _register(id: int, nick: String) -> void:
+func _register(id: int, nick: String, look: String = "") -> void:
 	if players.has(id):
 		return
 	var p := get_respawn_point() + Vector3(randf_range(-1.5, 1.5), 0, randf_range(-1.5, 1.5))
-	spawner.spawn({"t": "player", "id": id, "nick": nick.substr(0, 16), "color": _colors_used % 4, "pos": p})
+	spawner.spawn({"t": "player", "id": id, "nick": nick.substr(0, 16), "color": _colors_used % 4, "pos": p, "look": look.substr(0, 80)})
 	_colors_used += 1
 	if id != 1:
 		rpc_id(id, "recv_state", money, game_time, day, raining)
@@ -233,7 +233,7 @@ func _on_peer_disconnected(id: int) -> void:
 
 
 func _on_connected() -> void:
-	rpc_id(1, "register_player", Net.nick)
+	rpc_id(1, "register_player", Net.nick, Net.look.to_string_code())
 
 
 func _on_failed() -> void:
@@ -250,9 +250,9 @@ func _sender() -> int:
 
 
 @rpc("any_peer", "reliable")
-func register_player(nick: String) -> void:
+func register_player(nick: String, look: String = "") -> void:
 	if multiplayer.is_server():
-		_register(_sender(), nick)
+		_register(_sender(), nick, look)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")

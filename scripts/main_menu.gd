@@ -9,6 +9,16 @@ var status: Label
 var cam: Camera3D
 var fire_light: OmniLight3D
 var join_panel: Control
+var main_box: Control
+var look_panel: Control
+var preview: Node3D
+var preview_cm: CharModel
+var editing := false
+var edit_turn := 0.0
+var look: Look
+const PREVIEW_POS := Vector3(3.6, 0.0, 0.2)
+const FIRE_POS := Vector3(5.5, 0.0, 3.0)
+const EDIT_DIR := Vector3(0.35, 0.0, -0.94)
 var t := 0.0
 var rng := RandomNumberGenerator.new()
 
@@ -192,10 +202,42 @@ func _build_scene() -> void:
 	cam.far = 400
 	add_child(cam)
 	cam.current = true
+	look = Net.look
+	_build_preview()
 	_orbit(0.0)
 
 
+func _build_preview() -> void:
+	if preview:
+		preview.queue_free()
+	preview = Node3D.new()
+	preview.position = PREVIEW_POS
+	add_child(preview)
+	preview_cm = CharModel.new()
+	preview.add_child(preview_cm)
+	preview_cm.build(look)
+	preview.rotation.y = _face_yaw(FIRE_POS - PREVIEW_POS)
+
+
+func _face_yaw(v: Vector3) -> float:
+	return atan2(-v.x, -v.z)
+
+
 func _orbit(tm: float) -> void:
+	if editing:
+		var a0 := atan2(EDIT_DIR.z, EDIT_DIR.x) + edit_turn
+		var target_pos := PREVIEW_POS + Vector3(cos(a0), 0, sin(a0)) * 5.2 + Vector3(0, 1.4, 0)
+		if preview:
+			preview.rotation.y = lerp_angle(preview.rotation.y, _face_yaw(EDIT_DIR), 0.08)
+		cam.position = cam.position.lerp(target_pos, 0.1)
+		cam.fov = lerpf(cam.fov, 38.0, 0.1)
+		cam.h_offset = lerpf(cam.h_offset, -0.7, 0.1)
+		cam.look_at(PREVIEW_POS + Vector3(0, 1.15, 0), Vector3.UP)
+		return
+	cam.fov = lerpf(cam.fov, 55.0, 0.1)
+	cam.h_offset = lerpf(cam.h_offset, -5.5, 0.1)
+	if preview:
+		preview.rotation.y = lerp_angle(preview.rotation.y, _face_yaw(FIRE_POS - PREVIEW_POS), 0.08)
 	var a := deg_to_rad(205.0) + sin(tm * 0.08) * 0.35
 	var r := 15.5 + sin(tm * 0.11) * 1.5
 	cam.position = Vector3(2.5 + cos(a) * r, 2.6 + sin(tm * 0.13) * 0.4, 1.5 + sin(a) * r)
@@ -205,6 +247,9 @@ func _orbit(tm: float) -> void:
 func _process(delta: float) -> void:
 	t += delta
 	_orbit(t)
+	if preview_cm:
+		preview_cm.play("Idle")
+		preview_cm.advance(delta)
 	if fire_light:
 		fire_light.light_energy = 2.5 + sin(t * 17.0) * 0.4 + sin(t * 9.3) * 0.3 + randf() * 0.3
 
@@ -270,6 +315,7 @@ func _build_ui() -> void:
 	vb.custom_minimum_size = Vector2(380, 0)
 	vb.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	margin.add_child(vb)
+	main_box = vb
 	var title := Label.new()
 	title.text = T.t("game_title")
 	title.add_theme_font_size_override("font_size", 64)
@@ -304,6 +350,7 @@ func _build_ui() -> void:
 	vb.add_child(sp2)
 	vb.add_child(_big_button(T.t("menu_play"), _on_host, true))
 	vb.add_child(_big_button(T.t("menu_connect"), _open_join))
+	vb.add_child(_big_button(T.t("menu_look"), _open_look))
 	vb.add_child(_big_button(T.t("ui_settings"), _open_settings))
 	vb.add_child(_big_button(T.t("menu_quit"), func(): get_tree().quit()))
 	status = Label.new()
@@ -417,3 +464,136 @@ func _on_join() -> void:
 		join_panel = null
 		ip_edit = null
 	get_tree().change_scene_to_file.call_deferred("res://scenes/world.tscn")
+
+
+# ======================================================================= Редактор персонажа
+func _open_look() -> void:
+	editing = true
+	edit_turn = 0.0
+	main_box.visible = false
+	if look_panel:
+		look_panel.queue_free()
+	var pc := PanelContainer.new()
+	pc.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	pc.offset_left = 50
+	pc.offset_top = 40
+	pc.offset_bottom = -40
+	pc.offset_right = 470
+	pc.add_theme_stylebox_override("panel", _style(Color(0.05, 0.06, 0.05, 0.82), Color(0.85, 0.65, 0.3, 0.7)))
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	pc.add_child(scroll)
+	var vb := VBoxContainer.new()
+	vb.custom_minimum_size = Vector2(380, 0)
+	vb.add_theme_constant_override("separation", 10)
+	scroll.add_child(vb)
+	var tl := Label.new()
+	tl.text = T.t("look_title")
+	tl.add_theme_font_size_override("font_size", 30)
+	tl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.5))
+	vb.add_child(tl)
+	vb.add_child(_opt_row("look_body", Look.BODY_KEYS, look.body, func(i): look.body = i; _look_changed()))
+	vb.add_child(_swatch_row("look_skin", Look.SKIN_TONES, look.skin, func(c): look.skin = c; _look_changed()))
+	vb.add_child(_swatch_row("look_hair", Look.HAIR_COLORS, look.hair, func(c): look.hair = c; _look_changed()))
+	vb.add_child(_opt_row("look_beard", Look.BEARD_KEYS, look.beard, func(i): look.beard = i; _look_changed()))
+	vb.add_child(_opt_row("look_hat", Look.HAT_KEYS, look.hat, func(i): look.hat = i; _look_changed()))
+	vb.add_child(_color_row("look_hat_color", look.hat_color, func(c): look.hat_color = c; _look_changed()))
+	vb.add_child(_color_row("look_shirt", look.shirt, func(c): look.shirt = c; _look_changed()))
+	vb.add_child(_color_row("look_pants", look.pants, func(c): look.pants = c; _look_changed()))
+	var tl2 := Label.new()
+	tl2.text = T.t("look_turn")
+	vb.add_child(tl2)
+	var sl := HSlider.new()
+	sl.min_value = -3.14
+	sl.max_value = 3.14
+	sl.step = 0.01
+	sl.value = 0.0
+	sl.custom_minimum_size = Vector2(0, 28)
+	sl.value_changed.connect(func(v): edit_turn = v)
+	vb.add_child(sl)
+	var rnd := _big_button(T.t("look_random"), func():
+		var r := Look.random_look()
+		r.hat = look.hat
+		r.hat_color = look.hat_color
+		look = r
+		Net.look = look
+		_open_look())
+	rnd.custom_minimum_size.x = 0
+	vb.add_child(rnd)
+	var done := _big_button(T.t("look_done"), _close_look, true)
+	done.custom_minimum_size.x = 0
+	vb.add_child(done)
+	add_child(pc)
+	look_panel = pc
+
+
+func _close_look() -> void:
+	look.save()
+	Net.look = look
+	editing = false
+	main_box.visible = true
+	if look_panel:
+		look_panel.queue_free()
+		look_panel = null
+
+
+func _look_changed() -> void:
+	Net.look = look
+	var yaw := preview.rotation.y
+	_build_preview()
+	preview.rotation.y = yaw
+
+
+func _row_label(key: String) -> Label:
+	var l := Label.new()
+	l.text = T.t(key)
+	l.add_theme_color_override("font_color", Color(0.85, 0.85, 0.75))
+	return l
+
+
+func _opt_row(key: String, keys: Array, cur: int, cb: Callable) -> Control:
+	var vb := VBoxContainer.new()
+	vb.add_child(_row_label(key))
+	var ob := OptionButton.new()
+	for k in keys:
+		ob.add_item(T.t(k))
+	ob.select(cur)
+	ob.custom_minimum_size = Vector2(0, 38)
+	ob.item_selected.connect(cb)
+	vb.add_child(ob)
+	return vb
+
+
+func _swatch_row(key: String, colors: Array, cur: String, cb: Callable) -> Control:
+	var vb := VBoxContainer.new()
+	vb.add_child(_row_label(key))
+	var hb := HBoxContainer.new()
+	hb.add_theme_constant_override("separation", 6)
+	for c in colors:
+		var b := Button.new()
+		b.custom_minimum_size = Vector2(38, 38)
+		var st := _style(Color.html(c), Color(1, 0.9, 0.5) if c == cur else Color(0, 0, 0, 0.6), 3)
+		for n in ["normal", "hover", "pressed", "focus"]:
+			b.add_theme_stylebox_override(n, st)
+		var cc: String = c
+		b.pressed.connect(func():
+			Sfx.play_ui("click", -8)
+			cb.call(cc)
+			_open_look())
+		hb.add_child(b)
+	vb.add_child(hb)
+	return vb
+
+
+func _color_row(key: String, cur: String, cb: Callable) -> Control:
+	var hb := HBoxContainer.new()
+	var l := _row_label(key)
+	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hb.add_child(l)
+	var cp := ColorPickerButton.new()
+	cp.color = Color.html(cur)
+	cp.edit_alpha = false
+	cp.custom_minimum_size = Vector2(110, 36)
+	cp.color_changed.connect(func(c: Color): cb.call(c.to_html(false)))
+	hb.add_child(cp)
+	return hb

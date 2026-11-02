@@ -12,10 +12,12 @@ var ip := "127.0.0.1"
 var port := 7777
 var is_host := true
 var last_error := ""
+var look: Look = Look.new()
 
 
 func _ready() -> void:
 	setup_input()
+	look = Look.load_saved()
 	var cfg := ConfigFile.new()
 	if cfg.load(SETTINGS) == OK:
 		nick = cfg.get_value("net", "nick", nick)

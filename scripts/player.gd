@@ -43,13 +43,10 @@ var ride_xf := Transform3D()
 var world: Node
 var model: Node3D
 var hips: Node3D
+var cm: CharModel
+var look_code := ""
 var head: Node3D
-var arm_l: Node3D
-var arm_r: Node3D
-var leg_l: Node3D
-var leg_r: Node3D
 var gun: Node3D
-var torso_mi: MeshInstance3D
 var raincoat_mi: MeshInstance3D
 var name_label: Label3D
 var shape: CollisionShape3D
@@ -122,6 +119,7 @@ func setup(data: Dictionary) -> void:
 	peer_id = data.id
 	nick = data.nick
 	color_idx = data.color
+	look_code = str(data.get("look", ""))
 	name = "P_%d" % peer_id
 	position = data.pos
 	sync_xform = Transform3D(Basis(), data.pos)
@@ -147,44 +145,22 @@ func _build() -> void:
 	add_child(shape)
 
 	var pc: Color = COLORS[color_idx % COLORS.size()]
-	var skin := Color(0.85, 0.66, 0.52)
-	var pants := Color(0.22, 0.24, 0.18)
-	var boots := Color(0.18, 0.12, 0.08)
 	model = Node3D.new()
 	model.name = "Model"
 	add_child(model)
+	cm = CharModel.new()
+	model.add_child(cm)
+	cm.build(Look.from_string(look_code))
 	hips = Node3D.new()
 	hips.position.y = 0.95
 	model.add_child(hips)
-	torso_mi = MU.capsule(0.24, 0.75, pc, Vector3(0, 0.33, 0))
-	torso_mi.scale = Vector3(1.0, 1.0, 0.75)
-	hips.add_child(torso_mi)
-	hips.add_child(MU.box(Vector3(0.4, 0.06, 0.3), Color(0.3, 0.2, 0.1), Vector3(0, 0.02, 0)))   # ремень
-	raincoat_mi = MU.capsule(0.27, 0.95, Color(0.95, 0.78, 0.1, 0.92), Vector3(0, 0.25, 0))
+	raincoat_mi = MU.capsule(0.31, 1.0, Color(0.95, 0.78, 0.1, 0.92), Vector3(0, 0.3, 0))
 	raincoat_mi.scale = Vector3(1.0, 1.0, 0.8)
 	raincoat_mi.visible = false
 	hips.add_child(raincoat_mi)
-	# голова
 	head = Node3D.new()
-	head.position = Vector3(0, 0.72, 0)
-	hips.add_child(head)
-	head.add_child(MU.sphere(0.17, skin, Vector3(0, 0.1, 0), Vector3(1, 1.1, 1)))
-	head.add_child(MU.sphere(0.045, skin.darkened(0.08), Vector3(0, 0.08, -0.17)))
-	head.add_child(MU.sphere(0.025, Color(0.05, 0.05, 0.05), Vector3(0.06, 0.15, -0.145)))
-	head.add_child(MU.sphere(0.025, Color(0.05, 0.05, 0.05), Vector3(-0.06, 0.15, -0.145)))
-	head.add_child(MU.box(Vector3(0.12, 0.03, 0.04), Color(0.4, 0.25, 0.2), Vector3(0, 0.0, -0.15)))   # усы
-	head.add_child(MU.cyl(0.18, 0.19, 0.12, Color(0.95, 0.45, 0.05), Vector3(0, 0.24, 0)))          # кепка
-	head.add_child(MU.box(Vector3(0.26, 0.02, 0.14), Color(0.95, 0.45, 0.05), Vector3(0, 0.2, -0.2)))
-	# руки (шарнир в плече)
-	arm_l = _limb(Vector3(-0.3, 0.6, 0), 0.075, 0.62, pc, skin)
-	arm_r = _limb(Vector3(0.3, 0.6, 0), 0.075, 0.62, pc, skin)
-	hips.add_child(arm_l)
-	hips.add_child(arm_r)
-	# ноги (шарнир в бедре)
-	leg_l = _limb(Vector3(-0.12, 0.0, 0), 0.095, 0.9, pants, boots)
-	leg_r = _limb(Vector3(0.12, 0.0, 0), 0.095, 0.9, pants, boots)
-	hips.add_child(leg_l)
-	hips.add_child(leg_r)
+	head.position = Vector3(0, 1.62, 0)
+	model.add_child(head)
 	# ружьё
 	gun = Node3D.new()
 	gun.position = Vector3(0.18, 0.45, -0.25)
@@ -192,7 +168,7 @@ func _build() -> void:
 	_build_gun_model(weapon_vis)
 	# фонарик
 	flashlight = SpotLight3D.new()
-	flashlight.position = Vector3(0, 0.15, -0.2)
+	flashlight.position = Vector3(0, 0.05, -0.2)
 	flashlight.spot_range = 35
 	flashlight.spot_angle = 28
 	flashlight.light_energy = 3.0
@@ -217,10 +193,10 @@ func _build() -> void:
 	drips.mesh = dm
 	add_child(drips)
 	hand_prop = Node3D.new()
-	hand_prop.position = Vector3(0, -0.66, -0.06)
-	arm_r.add_child(hand_prop)
+	hand_prop.scale = Vector3.ONE * 2.2
+	cm.bone_attach("Fist.R").add_child(hand_prop)
 	smoke_fx = _make_fx(Color(0.8, 0.8, 0.8, 0.35), 0.05, Vector3(0, 0.6, 0), 2.0)
-	smoke_fx.position = Vector3(0, 0.05, -0.2)
+	smoke_fx.position = Vector3(0, -0.05, -0.2)
 	head.add_child(smoke_fx)
 	pee_fx = _make_fx(Color(0.95, 0.85, 0.2, 0.8), 0.015, Vector3(0, -9.0, 0), 0.6)
 	pee_fx.position = Vector3(0, 0.0, -0.2)
@@ -273,14 +249,6 @@ func _set_hand_prop(e: String) -> void:
 			hand_prop.add_child(MU.cyl(0.035, 0.035, 0.2, Color(0.5, 0.75, 0.95, 0.75), Vector3(0, 0.05, 0)))
 		"eat":
 			hand_prop.add_child(MU.box(Vector3(0.12, 0.05, 0.09), Color(0.45, 0.25, 0.1), Vector3(0, 0, -0.03)))
-
-
-func _limb(pivot: Vector3, r: float, length: float, c_top: Color, c_end: Color) -> Node3D:
-	var p := Node3D.new()
-	p.position = pivot
-	p.add_child(MU.capsule(r, length * 0.75, c_top, Vector3(0, -length * 0.38, 0)))
-	p.add_child(MU.sphere(r * 1.05, c_end, Vector3(0, -length * 0.82, -r * 0.4), Vector3(1, 0.8, 1.4)))
-	return p
 
 
 var muzzle_node: Marker3D
@@ -1361,8 +1329,7 @@ func _animate(delta: float) -> void:
 	emote_t += delta
 	var seat_i := _seat_index()
 	raincoat_mi.visible = raincoat
-	(torso_mi.material_override as StandardMaterial3D)
-	torso_mi.material_override = MU.mat(COLORS[color_idx % COLORS.size()] if jacket else Color(0.9, 0.9, 0.85))
+	cm.set_jacket(jacket)
 	if gun.get_meta("w", "x") != weapon_vis:
 		_build_gun_model(weapon_vis)
 	flashlight.visible = light_on and not dead
@@ -1377,131 +1344,100 @@ func _animate(delta: float) -> void:
 		if _blood_t <= 0.0:
 			_blood_t = 1.2
 			world.add_blood(global_position)
-	# поза
-	var la := Vector3.ZERO
-	var ra := Vector3.ZERO
-	var ll := Vector3.ZERO
-	var rl := Vector3.ZERO
-	var hip_y := 0.95
-	var hip_rot := Vector3.ZERO
-	var head_rot := Vector3(clampf(aim_pitch, -0.8, 0.8) * 0.6, 0, 0)
 	var show_gun := not holding_big and seat_i < 0 and emote == "" and weapon_vis != ""
 	var aim_pose := false
-	if ragdoll or dead:
-		var t := Time.get_ticks_msec() * 0.001
-		la = Vector3(sin(t * 9.0) * 1.2, 0, -1.2 + sin(t * 7.0) * 0.6)
-		ra = Vector3(cos(t * 8.0) * 1.2, 0, 1.2 + cos(t * 6.0) * 0.6)
-		ll = Vector3(sin(t * 10.0) * 0.8, 0, -0.3)
-		rl = Vector3(cos(t * 11.0) * 0.8, 0, 0.3)
-		if dead:
-			la = Vector3(0, 0, -1.4)
-			ra = Vector3(0, 0, 1.4)
-			ll = Vector3.ZERO
-			rl = Vector3.ZERO
+	var head_pitch := clampf(aim_pitch, -0.8, 0.8) * -0.5
+	# базовая анимация
+	var sit_len := cm.anim_length("SitDown")
+	var hold_hands := ""   # доп. поза рук поверх анимации
+	if dead:
+		cm.play("Death", 1.0, 0.1)
+		show_gun = false
+	elif ragdoll:
+		cm.hold("Defeat", 0.9)
 		show_gun = false
 	elif seat_i >= 0:
-		ll = Vector3(1.5, 0, 0)
-		rl = Vector3(1.5, 0, 0)
-		la = Vector3(0.6, 0, 0)
-		ra = Vector3(0.6, 0, 0)
-		hip_y = 0.5
-		if seat_i == 0:
-			la = Vector3(1.2, 0, 0.2)
-			ra = Vector3(1.2, 0, -0.2)
+		cm.hold("SitDown", sit_len * 0.95)
+		hold_hands = "wheel" if seat_i == 0 else "lap"
 	elif emote != "":
 		show_gun = false
-		var t := emote_t
 		match emote:
-			"wave":
-				ra = Vector3(0, 0, 2.6 + sin(t * 10.0) * 0.4)
-			"dance":
-				hip_y = 0.95 + absf(sin(t * 6.0)) * 0.08
-				la = Vector3(0, 0, -2.4 + sin(t * 6.0) * 0.6)
-				ra = Vector3(0, 0, 2.4 + sin(t * 6.0 + PI) * 0.6)
-				ll = Vector3(sin(t * 6.0) * 0.5, 0, 0)
-				rl = Vector3(-sin(t * 6.0) * 0.5, 0, 0)
-				hip_rot.y = sin(t * 3.0) * 0.6
-			"laugh":
-				hip_rot.x = -0.2 + sin(t * 18.0) * 0.06
-				head_rot = Vector3(-0.4, 0, 0)
-				la = Vector3(0.3, 0, -0.3)
-				ra = Vector3(0.3, 0, 0.3)
-			"point":
-				ra = Vector3(1.6, 0, 0)
 			"sit":
-				hip_y = 0.45
-				ll = Vector3(1.5, 0, -0.1)
-				rl = Vector3(1.5, 0, 0.1)
-				la = Vector3(0.3, 0, -0.2)
-				ra = Vector3(0.3, 0, 0.2)
-			"facepalm":
-				ra = Vector3(2.4, 0, 0.6)
-				head_rot = Vector3(0.4, 0, 0)
-			"shrug":
-				la = Vector3(0, 0, -0.9)
-				ra = Vector3(0, 0, 0.9)
-				head_rot = Vector3(0, 0, 0.25)
+				cm.hold("SitDown", sit_len * 0.95)
 			"squat", "poo":
-				hip_y = 0.5
-				ll = Vector3(1.4, 0, -0.35)
-				rl = Vector3(1.4, 0, 0.35)
-				la = Vector3(0.9, 0, -0.3)
-				ra = Vector3(0.9, 0, 0.3)
-				hip_rot.x = 0.25 + sin(t * 3.0) * 0.05
-				head_rot = Vector3(-0.3 + sin(t * 2.0) * 0.1, 0, 0)
-			"pee":
-				la = Vector3(0.5, 0, 0.35)
-				ra = Vector3(0.5, 0, -0.35)
-				head_rot = Vector3(-0.5, sin(t * 1.5) * 0.4, 0)
-			"eat":
-				ra = Vector3(2.3 + sin(t * 9.0) * 0.15, 0, -0.35)
-				head_rot = Vector3(0.1, 0, 0)
-			"drink", "beer", "vodka":
-				ra = Vector3(2.6, 0, -0.3)
-				head_rot = Vector3(-0.55, 0, 0)
-				hip_rot.x = -0.08
-			"smoke":
-				# затяжка раз в ~2.3 с
-				var puff := fmod(t, 2.3) < 1.0
-				ra = Vector3(2.45, 0, -0.35) if puff else Vector3(0.4, 0, 0.1)
-				head_rot = Vector3(-0.15 if puff else 0.0, 0, 0)
+				cm.hold("SitDown", sit_len * 0.45)
+				head_pitch = 0.3
+			"dance", "laugh":
+				cm.play("Victory", 1.4 if emote == "dance" else 2.2)
+			_:
+				cm.play("Idle")
+				hold_hands = emote
 		if not emote in LOOP_EMOTES and not emote in ACTION_EMOTES and emote != "squat" and emote_t > 3.5 and is_multiplayer_authority():
 			emote = ""
+	elif holding_big:
+		if anim_speed > 1.0:
+			cm.play("Run_Carry" if anim_speed > 5.0 else "Walk_Carry", clampf(anim_speed / (6.5 if anim_speed > 5.0 else 3.4), 0.5, 1.6))
+		else:
+			cm.hold("Walk_Carry", 0.0)
 	else:
-		var k := clampf(anim_speed / 6.0, 0.0, 1.2)
-		anim_phase += delta * (4.0 + anim_speed * 1.6)
-		var sw := sin(anim_phase) * 0.8 * k
-		ll = Vector3(sw, 0, 0)
-		rl = Vector3(-sw, 0, 0)
-		la = Vector3(-sw * 0.7, 0, -0.1)
-		ra = Vector3(sw * 0.7, 0, 0.1)
-		hip_y = 0.95 + absf(sin(anim_phase)) * 0.04 * k
-		if holding_big:
-			la = Vector3(1.4, 0, -0.1)
-			ra = Vector3(1.4, 0, 0.1)
-		elif show_gun:
-			aim_pose = true
+		if anim_speed > 5.2:
+			cm.play("Run", clampf(anim_speed / 6.2, 0.6, 1.5))
+		elif anim_speed > 0.8:
+			cm.play("Walk", clampf(anim_speed / 3.4, 0.6, 1.6))
+		else:
+			cm.play("Idle")
+		aim_pose = show_gun
+	cm.advance(delta)
+	# позы рук поверх анимации
+	var t := emote_t
+	match hold_hands:
+		"wheel":
+			cm.pose_arm("R", Vector3(0.15, -0.3, -0.9), Vector3(-0.1, 0.1, -1))
+			cm.pose_arm("L", Vector3(-0.15, -0.3, -0.9), Vector3(0.1, 0.1, -1))
+		"lap":
+			cm.pose_arm("R", Vector3(0.1, -0.8, -0.5), Vector3(-0.3, -0.2, -1))
+			cm.pose_arm("L", Vector3(-0.1, -0.8, -0.5), Vector3(0.3, -0.2, -1))
+		"wave":
+			cm.pose_arm("R", Vector3(0.8, 0.6, 0), Vector3(0.2 + sin(t * 10.0) * 0.5, 1.0, 0))
+		"point":
+			cm.pose_arm("R", Vector3(0.2, 0.05, -1), Vector3(0.1, 0.05, -1))
+		"facepalm":
+			cm.pose_arm("R", Vector3(0.4, 0.1, -0.7), Vector3(-0.1, 1.0, -0.4))
+			head_pitch = 0.3
+		"shrug":
+			cm.pose_arm("R", Vector3(0.9, -0.2, 0), Vector3(0.7, 0.7, -0.4))
+			cm.pose_arm("L", Vector3(-0.9, -0.2, 0), Vector3(-0.7, 0.7, -0.4))
+		"pee":
+			cm.pose_arm("R", Vector3(0.2, -0.8, -0.4), Vector3(-0.3, -0.4, -1))
+			cm.pose_arm("L", Vector3(-0.2, -0.8, -0.4), Vector3(0.3, -0.4, -1))
+			head_pitch = 0.5
+		"eat":
+			var bite := 0.5 + 0.5 * sin(t * 9.0)
+			cm.pose_arm("R", Vector3(0.3, -0.5, -0.7), Vector3(-0.15, 0.7 + bite * 0.3, -0.6))
+			head_pitch = -0.1
+		"drink", "beer", "vodka":
+			cm.pose_arm("R", Vector3(0.3, -0.4, -0.8), Vector3(-0.2, 1.0, -0.2))
+			head_pitch = -0.55
+		"smoke":
+			if fmod(t, 2.3) < 1.0:
+				cm.pose_arm("R", Vector3(0.3, -0.5, -0.7), Vector3(-0.15, 0.9, -0.5))
+				head_pitch = -0.15
 	if aim_pose and aim_vis:
 		# приклад в плечо, ствол смотрит туда же, куда камера
-		var p := clampf(aim_pitch, -1.0, 1.0)
-		var sh := Vector3(0.2, 0.6, 0.0)
-		gun.rotation = Vector3(p, 0, 0)
-		gun.position = sh + Basis(Vector3.RIGHT, p) * Vector3(0.0, -0.02, -0.3)
-		ra = Vector3(1.5 + p, 0.0, -0.12)
-		la = Vector3(1.42 + p, 0.0, 0.8)
-		head_rot = Vector3(clampf(aim_pitch, -0.8, 0.8) * 0.5, 0, -0.08)
+		var pa := clampf(aim_pitch, -1.0, 1.0)
+		var sh := Vector3(0.28, 1.5, 0.0)
+		var fwd := Vector3(0, sin(pa), -cos(pa))
+		gun.rotation = Vector3(pa, 0, 0)
+		gun.position = sh - hips.position + fwd * 0.3
+		cm.pose_arm("R", fwd, fwd)
+		cm.pose_arm("L", (fwd + Vector3(-0.25, -0.05, 0)).normalized(), (fwd + Vector3(0.1, 0.1, 0)).normalized())
+		head_pitch = clampf(aim_pitch, -0.8, 0.8) * -0.5
 	else:
 		gun.rotation = Vector3(0.0, 0.0, 0.9)
-		gun.position = Vector3(0.0, 0.4, 0.2)   # за спиной
+		gun.position = Vector3(0.0, 0.5, 0.2)   # за спиной
+	if head_pitch != 0.0:
+		cm.tilt_head(head_pitch)
 	gun.visible = show_gun and not ragdoll and not dead
-	var s := clampf(delta * 14.0, 0, 1) if delta > 0.0 else 1.0
-	arm_l.rotation = arm_l.rotation.lerp(la, s)
-	arm_r.rotation = arm_r.rotation.lerp(ra, s)
-	leg_l.rotation = leg_l.rotation.lerp(ll, s)
-	leg_r.rotation = leg_r.rotation.lerp(rl, s)
-	head.rotation = head.rotation.lerp(head_rot, s)
-	hips.position.y = lerpf(hips.position.y, hip_y, s)
-	hips.rotation = hips.rotation.lerp(hip_rot, s)
 	_footsteps(delta, seat_i)
 
 
