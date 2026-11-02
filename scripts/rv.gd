@@ -153,7 +153,7 @@ func _build() -> void:
 	# кабина: капот, приборная панель, лобовое стекло
 	_part(v, Vector3(2.3, 0.75, 1.0), Vector3(0, 1.0, 3.85), cream)
 	_part(v, Vector3(2.3, 0.08, 1.0), Vector3(0, 1.42, 3.85), brown)
-	_part(v, Vector3(2.2, 0.85, 0.5), Vector3(0, 1.475, 3.1), Color(0.18, 0.17, 0.16))
+	_part(v, Vector3(2.2, 0.85, 0.5), Vector3(0, 1.475, 3.1), Color(0.36, 0.33, 0.29))
 	_shape(Vector3(2.3, 1.3, 0.08), Vector3(0, 2.55, 3.35))
 	v.add_child(MU.box(Vector3(2.3, 1.3, 0.04), glass, Vector3(0, 2.55, 3.35)))
 	v.add_child(MU.box(Vector3(2.4, 0.1, 0.12), cream, Vector3(0, 3.18, 3.35)))
@@ -296,27 +296,27 @@ func _build_dashboard(v: Node3D) -> void:
 	v.add_child(MU.cyl(0.03, 0.03, 0.35, Color(0.1, 0.1, 0.1), Vector3(0.55, 1.98, 2.86), Vector3(-60, 0, 0)))
 	# тахометр со стрелкой
 	var gauge := Node3D.new()
-	gauge.transform = Transform3D(face, Vector3(0.55, 1.93, 2.97))
+	gauge.transform = Transform3D(face, Vector3(-0.42, 1.93, 2.97))
 	v.add_child(gauge)
 	gauge.add_child(MU.cyl(0.11, 0.11, 0.02, Color(0.05, 0.05, 0.05), Vector3.ZERO, Vector3(90, 0, 0), 20))
 	rpm_needle = Node3D.new()
 	rpm_needle.position = Vector3(0, 0, 0.015)
 	gauge.add_child(rpm_needle)
 	rpm_needle.add_child(MU.box(Vector3(0.008, 0.09, 0.005), MU.mat(Color(1, 0.3, 0.1), 0.5, 2.0), Vector3(0, 0.04, 0)))
-	dash_speed = _dash_label(Vector3(0.2, 1.93, 2.99), face, 34)
-	dash_info = _dash_label(Vector3(-0.15, 1.93, 2.99), face, 22)
-	dash_warn = _dash_label(Vector3(0.55, 1.8, 3.02), face, 20)
+	dash_speed = _dash_label(Vector3(-0.18, 1.93, 3.0), face, 34)
+	dash_info = _dash_label(Vector3(-0.72, 1.93, 3.0), face, 22)
+	dash_warn = _dash_label(Vector3(-0.3, 1.93, 3.2), face, 20)
 	dash_warn.modulate = Color(1, 0.4, 0.2)
 	# кнопки
 	var btns := [["winch_front", "btn_winch_front"], ["winch_rear", "btn_winch_rear"], ["lights", "btn_lights"], ["horn", "btn_horn"]]
 	for i in btns.size():
-		var pos := Vector3(-0.35 - i * 0.16, 1.93, 2.97)
+		var pos := Vector3(0.12 - i * 0.2, 1.93, 3.28)
 		var b := MU.box(Vector3(0.1, 0.06, 0.04), MU.mat(Color(0.7, 0.15, 0.1) if i < 2 else Color(0.2, 0.4, 0.7), 0.4, 0.6), pos)
 		b.basis = face
 		v.add_child(b)
 		var l := _dash_label(pos + Vector3(0, 0.0, 0.07), face, 12)
 		l.text = T.t(btns[i][1])
-		var a := MU.area_box(Vector3(0.14, 0.12, 0.12), pos, "rv_button", "Btn_" + btns[i][0])
+		var a := MU.area_box(Vector3(0.17, 0.14, 0.14), pos, "rv_button", "Btn_" + btns[i][0])
 		a.set_meta("action", btns[i][0])
 		add_child(a)
 

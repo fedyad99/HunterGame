@@ -23,6 +23,8 @@ func _physics_process(_d: float) -> bool:
 		match mode:
 			"cab":
 				w.req_sit(0)
+			"dash":
+				w.req_sit(0)
 			"chase":
 				w.req_sit(0)
 				p.chase_cam = true
@@ -36,6 +38,10 @@ func _physics_process(_d: float) -> bool:
 				p.cam_pitch = -0.1
 			"inv":
 				w.hud.open_inventory(p)
+	if mode == "dash" and f > 8:
+		p.cam_pitch = -0.55
+		p.cam_yaw = rv.rotation.y + PI
+		rv.fuel = 18.0
 	if f == 150:
 		var img := root.get_texture().get_image()
 		img.save_png(out)
