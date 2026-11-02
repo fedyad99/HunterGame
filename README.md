@@ -99,6 +99,16 @@
 клиент запрашивает у хоста через RPC, а хост проверяет запрос и выполняет его. Сущности
 создаёт `MultiplayerSpawner`, поэтому опоздавшие игроки получают текущее состояние мира.
 
+## Сборка exe
+
+В редакторе: Project → Export → Windows Desktop (нужны export templates 4.3). Или без редактора:
+
+```
+godot --headless --path . --export-release "Windows Desktop" export/HunterGame.exe
+```
+
+При каждом пуше в `main` GitHub Actions собирает exe автоматически (вкладка Actions → артефакт `HunterGame-windows-x64`).
+
 ## Тесты без окна
 
 ```
