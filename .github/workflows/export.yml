@@ -1,0 +1,30 @@
+name: Export Windows build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Godot 4.3 and Windows export templates
+        run: |
+          curl -sSL -o godot.zip https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          unzip -q godot.zip
+          curl -sSL -o tpl.tpz https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          T=$HOME/.local/share/godot/export_templates/4.3.stable
+          mkdir -p $T
+          unzip -q -j tpl.tpz 'templates/windows_*x86_64*' templates/version.txt -d $T
+          rm tpl.tpz
+      - name: Import and export
+        run: |
+          mkdir -p export
+          ./Godot_v4.3-stable_linux.x86_64 --headless --path . --import || true
+          ./Godot_v4.3-stable_linux.x86_64 --headless --path . --export-release "Windows Desktop" export/HunterGame.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HunterGame-windows-x64
+          path: export/HunterGame.exe
