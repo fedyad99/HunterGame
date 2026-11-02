@@ -25,6 +25,11 @@ var dead_rect: ColorRect
 var drunk_rect: ColorRect
 var _hit_t := 0.0
 var _menu_refresh: Callable
+var menu_scroll: ScrollContainer
+var scope_ctl: Control
+var _scope_mode := ""
+var _shop_cat := "food"
+var _map_tex: ImageTexture
 
 
 func _ready() -> void:
@@ -69,6 +74,13 @@ func _ready() -> void:
 	ammo_ctl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ammo_ctl.draw.connect(_draw_ammo)
 	root.add_child(ammo_ctl)
+	# оптика: чёрное поле вокруг линзы и сетка; коллиматор — красная точка
+	scope_ctl = Control.new()
+	scope_ctl.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scope_ctl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	scope_ctl.draw.connect(_draw_scope)
+	scope_ctl.visible = false
+	root.add_child(scope_ctl)
 	# смерть
 	dead_rect = ColorRect.new()
 	dead_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -102,6 +114,7 @@ func _ready() -> void:
 	menu_title = _label(26, Color(1.0, 0.9, 0.6))
 	mvb.add_child(menu_title)
 	var scroll := ScrollContainer.new()
+	menu_scroll = scroll
 	scroll.custom_minimum_size = Vector2(520, 460)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	mvb.add_child(scroll)
@@ -207,7 +220,13 @@ func update_hud(p: Player) -> void:
 	need_icons.poison.visible = p.poison > 0.05
 	need_icons.poison.set_severity(clampf(p.poison / 50.0, 0.3, 1.0))
 	# прицел
-	cross_ctl.visible = (p.seated < 0 and not p.dead and not p.ragdoll) or (p.seated >= 0 and p.first_person)
+	_scope_mode = ""
+	if p.aiming and p.cur_weapon != "" and p.seated < 0 and not p.dead:
+		_scope_mode = "scope" if p.scope_view else p.optic_mode()
+	scope_ctl.visible = _scope_mode != ""
+	if scope_ctl.visible:
+		scope_ctl.queue_redraw()
+	cross_ctl.visible = ((p.seated < 0 and not p.dead and not p.ragdoll) or (p.seated >= 0 and p.first_person)) and _scope_mode != "scope"
 	_cross_aim = p.aiming and p.cur_weapon != ""
 	_cross_target = p.target_kind != "" or world.get_held_item(p.peer_id) != null
 	cross_ctl.queue_redraw()
@@ -235,8 +254,14 @@ func menu_open() -> bool:
 	return menu_panel.visible or _settings_panel != null
 
 
-func _open(title: String, refresh: Callable) -> void:
+func _open(title: String, refresh: Callable, size := Vector2(560, 460)) -> void:
 	menu_title.text = title
+	menu_scroll.custom_minimum_size = Vector2(size.x - 40, size.y)
+	menu_panel.custom_minimum_size = Vector2(size.x, 120)
+	menu_panel.offset_left = -size.x * 0.5
+	menu_panel.offset_right = size.x * 0.5
+	menu_panel.offset_top = -size.y * 0.5 - 70
+	menu_panel.offset_bottom = menu_panel.offset_top + 120
 	_menu_refresh = refresh
 	_rebuild()
 	menu_panel.visible = true
@@ -426,7 +451,7 @@ func _build_inventory(p: Player) -> void:
 		var def: Dictionary = ItemsDB.ITEMS[e.kind]
 		if def.has("use"):
 			var bu := Button.new()
-			bu.text = T.t("ui_equip") if def.use == "equip" else T.t("ui_use")
+			bu.text = T.t("ui_equip") if def.use == "equip" else (T.t("ui_attach") if def.use == "attach" else T.t("ui_use"))
 			bu.pressed.connect(func():
 				p.use_slot(idx)
 				if def.use == "equip":
@@ -482,43 +507,147 @@ func _entry_label(e: Dictionary) -> String:
 	return n
 
 
-## Склад дома: холодильник, стеллаж, шкафчик. Содержимое хранит хост (rv.store).
+## Ячейка-иконка предмета (без текста, кроме мелкой подписи). Возвращает Panel.
+func _icon_slot(kind: String, px: float, caption := "", badge := "", sel := false) -> Panel:
+	var slot := Panel.new()
+	slot.custom_minimum_size = Vector2(px, px)
+	slot.clip_contents = true
+	var has := kind != ""
+	var base := Color(0.16, 0.18, 0.15, 0.95) if has else Color(0.1, 0.11, 0.1, 0.7)
+	slot.add_theme_stylebox_override("panel", _slot_style(base, Color(1.0, 0.85, 0.4) if sel else Color(0.35, 0.33, 0.25)))
+	if has:
+		var tr := TextureRect.new()
+		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tr.set_anchors_preset(Control.PRESET_FULL_RECT)
+		tr.offset_left = 6
+		tr.offset_top = 6
+		tr.offset_right = -6
+		tr.offset_bottom = -6 if caption == "" else -18
+		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot.add_child(tr)
+		icons.request(kind, tr)
+	if caption != "":
+		var cap := _label(11, Color(0.9, 0.9, 0.8))
+		cap.text = caption
+		cap.clip_text = true
+		cap.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+		cap.offset_top = -18
+		cap.offset_left = 4
+		cap.offset_right = -4
+		slot.add_child(cap)
+	if badge != "":
+		var b := _label(12, Color(1.0, 0.8, 0.4))
+		b.text = badge
+		b.position = Vector2(4, 2)
+		slot.add_child(b)
+	return slot
+
+
+func _drag_preview(kind: String) -> Control:
+	var tr := TextureRect.new()
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.size = Vector2(72, 72)
+	tr.position = Vector2(-36, -36)
+	tr.modulate = Color(1, 1, 1, 0.85)
+	icons.request(kind, tr)
+	var c := Control.new()
+	c.add_child(tr)
+	return c
+
+
+## Склад дома: две сетки иконок. Вещь переносится только перетаскиванием мышью.
 func open_storage(p: Player, key: String) -> void:
-	var refresh_later := func(): get_tree().create_timer(0.25).timeout.connect(_rebuild)
+	var refresh_later := func(): get_tree().create_timer(0.25).timeout.connect(func():
+		if menu_panel.visible:
+			_rebuild())
 	_open(T.t("ui_store_" + key), func():
 		var rv: RV = world.rv
 		var arr: Array = rv.store.get(key, [])
-		_text(T.t("ui_store_inside", [arr.size(), int(RV.STORE_CAP[key])]), Color(1, 0.9, 0.5))
-		if key == "fridge":
-			_text(T.t("ui_store_cold"), Color(0.6, 0.85, 1.0))
-		if arr.is_empty():
-			_text(T.t("ui_store_empty"))
-		for i in arr.size():
-			var e: Dictionary = arr[i]
+		var cap: int = int(RV.STORE_CAP[key])
+		var title := _label(16, Color(1, 0.9, 0.5))
+		title.text = T.t("ui_store_inside", [arr.size(), cap])
+		menu_box.add_child(title)
+		var drop_store := func(_pos: Vector2, data: Variant) -> void:
+			if typeof(data) != TYPE_DICTIONARY or data.get("from") != "inv":
+				return
+			var jj: int = data.idx
+			if jj >= p.inventory.size() or rv.store.get(key, []).size() >= cap:
+				Sfx.play_ui("click", -14)
+				return
+			var ent: Dictionary = p.inventory[jj]
+			if str(ent.kind).begins_with("weapon_") or ItemsDB.is_heavy(ent.kind):
+				Sfx.play_ui("click", -14)
+				return
+			p.inventory.remove_at(jj)
+			world.rpc_id(1, "req_store", key, "put", ent.duplicate(), 0)
+			Sfx.play_ui("click", -8)
+			refresh_later.call()
+		var can_store := func(_pos: Vector2, data: Variant) -> bool:
+			return typeof(data) == TYPE_DICTIONARY and data.get("from") == "inv"
+		var drop_inv := func(_pos: Vector2, data: Variant) -> void:
+			if typeof(data) != TYPE_DICTIONARY or data.get("from") != "store":
+				return
+			var ii: int = data.idx
+			var cur: Array = rv.store.get(key, [])
+			if ii >= cur.size():
+				return
+			if not p.can_add(cur[ii].kind):
+				add_msg(T.t("msg_inv_full"))
+				Sfx.play_ui("click", -14)
+				return
+			world.rpc_id(1, "req_store", key, "take", {}, ii)
+			Sfx.play_ui("click", -8)
+			refresh_later.call()
+		var can_inv := func(_pos: Vector2, data: Variant) -> bool:
+			return typeof(data) == TYPE_DICTIONARY and data.get("from") == "store"
+		var g1 := GridContainer.new()
+		g1.columns = 6
+		g1.add_theme_constant_override("h_separation", 6)
+		g1.add_theme_constant_override("v_separation", 6)
+		menu_box.add_child(g1)
+		for i in cap:
+			var kind: String = str(arr[i].kind) if i < arr.size() else ""
+			var badge := ""
+			if kind != "":
+				var fr := ItemsDB.freshness(kind, float(arr[i].get("age", 0.0)))
+				badge = "⚠" if fr > 0 else ""
+			var sl := _icon_slot(kind, 96, ItemsDB.item_name(kind) if kind != "" else "", badge)
+			sl.tooltip_text = _entry_label(arr[i]) if kind != "" else ""
 			var idx := i
-			_btn("%s: %s" % [T.t("ui_store_take"), _entry_label(e)], func():
-				if not p.can_add(e.kind):
-					add_msg(T.t("msg_inv_full"))
-					return
-				world.rpc_id(1, "req_store", key, "take", {}, idx)
-				refresh_later.call())
-		_text(T.t("ui_store_mine"), Color(1, 0.9, 0.5))
-		var any := false
-		for j in p.inventory.size():
-			var e2: Dictionary = p.inventory[j]
-			if str(e2.kind).begins_with("weapon_"):
-				continue
-			any = true
-			var jj := j
-			_btn("%s: %s" % [T.t("ui_store_put"), _entry_label(e2)], func():
-				if jj >= p.inventory.size():
-					return
-				var ent: Dictionary = p.inventory[jj]
-				p.inventory.remove_at(jj)
-				world.rpc_id(1, "req_store", key, "put", ent.duplicate(), 0)
-				refresh_later.call())
-		if not any:
-			_text(T.t("ui_inv_empty")))
+			sl.set_drag_forwarding(func(_pos):
+				if idx >= rv.store.get(key, []).size():
+					return null
+				sl.set_drag_preview(_drag_preview(kind))
+				return {"from": "store", "idx": idx}, can_store, drop_store)
+			g1.add_child(sl)
+		var sep := HSeparator.new()
+		menu_box.add_child(sep)
+		var t2 := _label(16, Color(1, 0.9, 0.5))
+		t2.text = T.t("ui_store_mine")
+		menu_box.add_child(t2)
+		var g2 := GridContainer.new()
+		g2.columns = 6
+		g2.add_theme_constant_override("h_separation", 6)
+		g2.add_theme_constant_override("v_separation", 6)
+		menu_box.add_child(g2)
+		for j in Player.MAX_SLOTS:
+			var kind2: String = str(p.inventory[j].kind) if j < p.inventory.size() else ""
+			var sl2 := _icon_slot(kind2, 96, ItemsDB.item_name(kind2) if kind2 != "" else "")
+			sl2.tooltip_text = _entry_label(p.inventory[j]) if kind2 != "" else ""
+			if kind2.begins_with("weapon_"):
+				sl2.modulate = Color(1, 1, 1, 0.45)
+			var jdx := j
+			sl2.set_drag_forwarding(func(_pos):
+				if jdx >= p.inventory.size() or kind2.begins_with("weapon_"):
+					return null
+				sl2.set_drag_preview(_drag_preview(kind2))
+				return {"from": "inv", "idx": jdx}, can_inv, drop_inv)
+			g2.add_child(sl2)
+		var hint := _label(13, Color(0.7, 0.75, 0.7))
+		hint.text = T.t("ui_store_drag") + ("  " + T.t("ui_store_cold") if key == "fridge" else "")
+		hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		menu_box.add_child(hint), Vector2(680, 560))
 
 
 func open_toilet(p: Player) -> void:
@@ -531,34 +660,335 @@ func open_toilet(p: Player) -> void:
 			p.do_toilet(true)))
 
 
+## Фактория: вкладки-категории и карточки с иконкой, коротким описанием и ценой.
 func open_shop(p: Player, shop_idx: int) -> void:
 	_open(T.t("ui_shop"), func():
-		_text(T.t("ui_money", [world.money]), Color(1, 0.9, 0.5))
+		var top := HBoxContainer.new()
+		top.add_theme_constant_override("separation", 12)
+		var ml := _label(18, Color(1, 0.9, 0.5))
+		ml.text = T.t("ui_money", [world.money])
+		top.add_child(ml)
 		var loot: Array = []
 		var loot_sum := 0
 		for e in p.inventory:
 			if world.is_loot(e.kind):
 				loot.append(e)
 				loot_sum += int(round(float(ItemsDB.ITEMS[e.kind].price) * float(e.q)))
-		var sell_cb := func():
+		var sb := Button.new()
+		sb.text = T.t("ui_sell_loot", [loot.size(), loot_sum])
+		sb.disabled = loot.is_empty()
+		sb.pressed.connect(func():
 			var arr: Array = []
 			for e in loot:
 				arr.append([e.kind, float(e.q)])
 				p.inventory.erase(e)
 			world.rpc_id(1, "req_sell_inv", arr)
-			get_tree().create_timer(0.3).timeout.connect(_rebuild)
-		_btn(T.t("ui_sell_loot", [loot.size(), loot_sum]), sell_cb, loot.is_empty())
+			get_tree().create_timer(0.3).timeout.connect(_rebuild))
+		top.add_child(sb)
+		menu_box.add_child(top)
+		var tabs := HBoxContainer.new()
+		for c in ItemsDB.SHOP_CATS:
+			var cat: String = c
+			var tb := Button.new()
+			tb.text = T.t("ui_cat_" + cat)
+			tb.toggle_mode = true
+			tb.button_pressed = cat == _shop_cat
+			tb.custom_minimum_size = Vector2(150, 34)
+			tb.pressed.connect(func():
+				Sfx.play_ui("click", -10)
+				_shop_cat = cat
+				_rebuild())
+			tabs.add_child(tb)
+		menu_box.add_child(tabs)
+		var grid := GridContainer.new()
+		grid.columns = 3
+		grid.add_theme_constant_override("h_separation", 8)
+		grid.add_theme_constant_override("v_separation", 8)
+		menu_box.add_child(grid)
 		for i in ItemsDB.SHOP.size():
 			var e: Dictionary = ItemsDB.SHOP[i]
-			var price: int = world.shop_price(i)
-			var label := T.t("shop_" + e.key)
+			if str(e.get("cat", "gear")) != _shop_cat:
+				continue
 			if e.type == "weapon" and p.inv_has("weapon_" + str(e.weapon)):
 				continue
+			var price: int = world.shop_price(i)
+			var card := PanelContainer.new()
+			card.custom_minimum_size = Vector2(292, 150)
+			card.add_theme_stylebox_override("panel", _slot_style(Color(0.14, 0.16, 0.13, 0.95), Color(0.35, 0.33, 0.25)))
+			var hb := HBoxContainer.new()
+			hb.add_theme_constant_override("separation", 8)
+			card.add_child(hb)
+			var ic := _icon_slot(str(e.key), 88)
+			ic.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			hb.add_child(ic)
+			var vb := VBoxContainer.new()
+			vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			hb.add_child(vb)
+			var nl := _label(15, Color(1.0, 0.92, 0.7))
+			nl.text = T.t("shop_" + e.key)
+			nl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			nl.custom_minimum_size = Vector2(180, 0)
+			vb.add_child(nl)
+			var dl := _label(12, Color(0.78, 0.8, 0.74))
+			dl.text = T.t("desc_" + e.key)
+			dl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			dl.custom_minimum_size = Vector2(180, 0)
+			dl.size_flags_vertical = Control.SIZE_EXPAND_FILL
+			vb.add_child(dl)
+			var bb := Button.new()
 			var idx := i
 			if price < 0:
-				_btn("%s — %s" % [label, T.t("ui_max")], func(): pass, true)
+				bb.text = T.t("ui_max")
+				bb.disabled = true
 			else:
-				_btn("%s — %d $" % [label, price], func():
+				bb.text = T.t("ui_buy", [price])
+				bb.disabled = world.money < price
+				bb.pressed.connect(func():
+					Sfx.play_ui("click", -8)
 					world.rpc_id(1, "req_buy", idx, shop_idx)
 					get_tree().create_timer(0.3).timeout.connect(_rebuild))
-		_text(T.t("ui_shop_hint")))
+			vb.add_child(bb)
+			grid.add_child(card)
+		var hint := _label(12, Color(0.7, 0.75, 0.7))
+		hint.text = T.t("ui_shop_hint")
+		hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		menu_box.add_child(hint), Vector2(960, 600))
+
+
+## Обвесы (T): слоты текущего ружья; щелчок по стоящему — снять, по обвесу из рюкзака — поставить.
+func open_attachments(p: Player) -> void:
+	_open(T.t("ui_attachments"), func():
+		if p.cur_weapon == "":
+			_text(T.t("ui_att_no_weapon"))
+			return
+		var w := p.cur_weapon
+		var head := HBoxContainer.new()
+		head.add_child(_icon_slot("weapon_" + w, 110))
+		var wl := _label(20, Color(1.0, 0.9, 0.6))
+		wl.text = T.t("item_weapon_" + w)
+		wl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		head.add_child(wl)
+		menu_box.add_child(head)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 12)
+		menu_box.add_child(row)
+		for sl in ItemsDB.ATTACH_SLOTS:
+			var slot_name: String = sl
+			var k := p.attached(slot_name)
+			var vb := VBoxContainer.new()
+			var l := _label(14, Color(0.85, 0.85, 0.8))
+			l.text = T.t("att_slot_" + slot_name)
+			vb.add_child(l)
+			var ic := _icon_slot(k, 110, ItemsDB.item_name(k) if k != "" else "", "", k != "")
+			ic.tooltip_text = T.t("ui_att_remove") if k != "" else ""
+			if k != "":
+				ic.gui_input.connect(func(ev: InputEvent):
+					if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+						p.detach(slot_name)
+						_rebuild())
+			vb.add_child(ic)
+			row.add_child(vb)
+		var t2 := _label(15, Color(1, 0.9, 0.5))
+		t2.text = T.t("ui_att_bag")
+		menu_box.add_child(t2)
+		var g := HBoxContainer.new()
+		g.add_theme_constant_override("separation", 8)
+		menu_box.add_child(g)
+		var any := false
+		for i in p.inventory.size():
+			var kind := str(p.inventory[i].kind)
+			if not ItemsDB.ATTACH.has(kind):
+				continue
+			any = true
+			var fits := p.can_attach(kind, w)
+			var ic2 := _icon_slot(kind, 96, ItemsDB.item_name(kind))
+			if not fits:
+				ic2.modulate = Color(1, 0.5, 0.5, 0.5)
+				ic2.tooltip_text = T.t("ui_att_not_fit")
+			else:
+				var ii := i
+				ic2.gui_input.connect(func(ev: InputEvent):
+					if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+						p.attach_from_inv(ii)
+						_rebuild())
+			g.add_child(ic2)
+		if not any:
+			_text(T.t("ui_att_none")), Vector2(620, 420))
+
+
+# ======================================================================= ОПТИКА
+func _draw_scope() -> void:
+	var c := scope_ctl
+	var sz := c.size
+	var ctr := sz * 0.5
+	if _scope_mode == "scope":
+		var r := sz.y * 0.46
+		# чёрное поле вокруг круглой линзы
+		c.draw_rect(Rect2(0, 0, ctr.x - r + 1, sz.y), Color.BLACK)
+		c.draw_rect(Rect2(ctr.x + r - 1, 0, sz.x - ctr.x - r + 1, sz.y), Color.BLACK)
+		# углы между квадратом и кругом — толстой дугой
+		c.draw_arc(ctr, r + r * 0.3, 0, TAU, 96, Color.BLACK, r * 0.6, true)
+		c.draw_arc(ctr, r, 0, TAU, 96, Color(0, 0, 0, 0.6), 10.0, true)
+		# сетка: толстые линии по краям, тонкие к центру
+		var k := Color(0, 0, 0, 0.9)
+		c.draw_line(ctr + Vector2(-r, 0), ctr + Vector2(-r * 0.25, 0), k, 5.0)
+		c.draw_line(ctr + Vector2(r * 0.25, 0), ctr + Vector2(r, 0), k, 5.0)
+		c.draw_line(ctr + Vector2(0, r * 0.25), ctr + Vector2(0, r), k, 5.0)
+		c.draw_line(ctr + Vector2(-r * 0.25, 0), ctr + Vector2(r * 0.25, 0), k, 1.2)
+		c.draw_line(ctr + Vector2(0, -r), ctr + Vector2(0, r * 0.25), k, 1.2)
+		for i in range(1, 4):
+			var y := ctr.y + r * 0.06 * i
+			c.draw_line(Vector2(ctr.x - 6, y), Vector2(ctr.x + 6, y), k, 1.0)
+		if _hit_t > 0.0:
+			c.draw_arc(ctr, 14.0, 0, TAU, 24, _hit_col, 2.0, true)
+	elif _scope_mode == "dot":
+		c.draw_circle(ctr, 3.2, Color(1.0, 0.1, 0.05, 0.95))
+		c.draw_circle(ctr, 6.0, Color(1.0, 0.1, 0.05, 0.18))
+
+
+# ======================================================================= КАРТА
+const MAP_PX := 760
+const HAB_COL := {"deer": Color(0.95, 0.75, 0.2), "boar": Color(0.75, 0.35, 0.2), "bear": Color(0.85, 0.15, 0.1), "rabbit": Color(0.65, 0.65, 0.9)}
+
+
+## Бумажная карта местности из того же рельефа, что и мир (одинакова у всех).
+func _build_map_tex() -> ImageTexture:
+	if _map_tex:
+		return _map_tex
+	var n := TerrainGen.N
+	var img := Image.create(n, n, false, Image.FORMAT_RGB8)
+	var paper := Color(0.86, 0.8, 0.64)
+	var light := Vector3(-1, 2.2, -1).normalized()
+	for j in n:
+		for i in n:
+			var h: float = TerrainGen.grid[j * n + i]
+			var c := paper
+			if h < TerrainGen.WATER:
+				var d := clampf(-h / 6.0, 0.0, 1.0)
+				c = Color(0.55, 0.68, 0.72).lerp(Color(0.32, 0.48, 0.6), d)
+			else:
+				# высотные пояса: низины зеленее, горы коричневее
+				var t := clampf(h / 70.0, 0.0, 1.0)
+				c = Color(0.74, 0.8, 0.58).lerp(Color(0.8, 0.7, 0.55), t)
+				var hx: float = TerrainGen.grid[j * n + mini(i + 1, n - 1)] - TerrainGen.grid[j * n + maxi(i - 1, 0)]
+				var hz: float = TerrainGen.grid[mini(j + 1, n - 1) * n + i] - TerrainGen.grid[maxi(j - 1, 0) * n + i]
+				var nrm := Vector3(-hx, 2.0 * TerrainGen.STEP, -hz).normalized()
+				var sh := clampf(nrm.dot(light), 0.0, 1.0)
+				c = c * (0.62 + 0.5 * sh)
+				# горизонтали каждые 10 м
+				if fmod(h, 10.0) < 0.55:
+					c = c.lerp(Color(0.5, 0.36, 0.22), 0.45)
+				var sw: float = TerrainGen.swamp[j * n + i] if TerrainGen.swamp.size() == n * n else 0.0
+				if sw > 0.25:
+					c = c.lerp(Color(0.42, 0.45, 0.3), 0.55)
+					if (i + j) % 4 == 0:
+						c = c.lerp(Color(0.25, 0.32, 0.25), 0.6)
+			c.a = 1.0
+			img.set_pixel(i, j, c)
+	img.resize(MAP_PX, MAP_PX, Image.INTERPOLATE_BILINEAR)
+	_map_tex = ImageTexture.create_from_image(img)
+	return _map_tex
+
+
+func _map_pos(p: Vector2) -> Vector2:
+	return (p + Vector2(TerrainGen.HALF, TerrainGen.HALF)) / (TerrainGen.HALF * 2.0) * MAP_PX
+
+
+func open_map(p: Player) -> void:
+	_open(T.t("ui_map"), func():
+		var hb := HBoxContainer.new()
+		hb.add_theme_constant_override("separation", 14)
+		menu_box.add_child(hb)
+		var canvas := Control.new()
+		canvas.custom_minimum_size = Vector2(MAP_PX, MAP_PX)
+		hb.add_child(canvas)
+		var tex := _build_map_tex()
+		var font := ThemeDB.fallback_font
+		canvas.draw.connect(func():
+			canvas.draw_texture(tex, Vector2.ZERO)
+			# зоны обитания: штриховые круги
+			var wl: Node = world.get("wild")
+			if wl:
+				for kind in wl.habitats:
+					var col: Color = HAB_COL.get(kind, Color.WHITE)
+					for z in wl.habitats[kind]:
+						var cp := _map_pos(z.pos)
+						var rr: float = float(z.r) / (TerrainGen.HALF * 2.0) * MAP_PX
+						canvas.draw_circle(cp, rr, Color(col.r, col.g, col.b, 0.16))
+						for s2 in 24:
+							if s2 % 2 == 0:
+								var a0 := TAU * s2 / 24.0
+								canvas.draw_arc(cp, rr, a0, a0 + TAU / 24.0, 6, Color(col.r, col.g, col.b, 0.8), 2.0, true)
+						_draw_paw(canvas, cp, col)
+			# дороги
+			for rs in TerrainGen.roads:
+				canvas.draw_line(_map_pos(rs[0]), _map_pos(rs[1]), Color(0.4, 0.28, 0.18), 4.0, true)
+				canvas.draw_line(_map_pos(rs[0]), _map_pos(rs[1]), Color(0.78, 0.62, 0.42), 2.0, true)
+			# фактории
+			for o in TerrainGen.outposts:
+				var op := _map_pos(o.pos)
+				canvas.draw_rect(Rect2(op - Vector2(7, 7), Vector2(14, 14)), Color(0.25, 0.15, 0.08))
+				canvas.draw_rect(Rect2(op - Vector2(5, 5), Vector2(10, 10)), Color(0.9, 0.75, 0.4))
+				canvas.draw_string(font, op + Vector2(10, -8), T.t(o.key), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.2, 0.12, 0.05))
+			# дом и игроки
+			if world.rv:
+				var rp := _map_pos(Vector2(world.rv.global_position.x, world.rv.global_position.z))
+				canvas.draw_rect(Rect2(rp - Vector2(6, 4), Vector2(12, 8)), Color(0.9, 0.9, 0.85))
+				canvas.draw_rect(Rect2(rp - Vector2(6, 4), Vector2(12, 8)), Color(0.1, 0.1, 0.1), false, 1.5)
+			for pl in world.players.values():
+				var pp := _map_pos(Vector2(pl.global_position.x, pl.global_position.z))
+				var me: bool = pl == p
+				canvas.draw_circle(pp, 6.0 if me else 4.5, Color(0.1, 0.1, 0.1))
+				canvas.draw_circle(pp, 4.5 if me else 3.2, Color(0.95, 0.2, 0.2) if me else Color(0.2, 0.5, 0.95))
+				if me:
+					var f: Vector3 = -pl.global_transform.basis.z
+					var d := Vector2(f.x, f.z).normalized()
+					canvas.draw_line(pp, pp + d * 14.0, Color(0.95, 0.2, 0.2), 2.5)
+			# рамка и роза ветров
+			canvas.draw_rect(Rect2(Vector2.ZERO, Vector2(MAP_PX, MAP_PX)), Color(0.3, 0.2, 0.1), false, 3.0)
+			var cr := Vector2(MAP_PX - 40, 44)
+			canvas.draw_line(cr + Vector2(0, 22), cr + Vector2(0, -22), Color(0.25, 0.15, 0.08), 2.0)
+			canvas.draw_line(cr + Vector2(-16, 0), cr + Vector2(16, 0), Color(0.25, 0.15, 0.08), 1.5)
+			canvas.draw_string(font, cr + Vector2(-5, -26), T.t("dir_N"), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.25, 0.15, 0.08)))
+		# легенда
+		var leg := VBoxContainer.new()
+		leg.add_theme_constant_override("separation", 8)
+		hb.add_child(leg)
+		var lt := _label(18, Color(1, 0.9, 0.6))
+		lt.text = T.t("ui_map_legend")
+		leg.add_child(lt)
+		for kind in ["deer", "boar", "bear", "rabbit"]:
+			var r := HBoxContainer.new()
+			var sw := ColorRect.new()
+			sw.color = HAB_COL[kind]
+			sw.custom_minimum_size = Vector2(18, 18)
+			sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			r.add_child(sw)
+			var l := _label(15)
+			l.text = T.t("map_hab_" + kind)
+			r.add_child(l)
+			leg.add_child(r)
+		for e in [["map_swamp", Color(0.42, 0.45, 0.3)], ["map_water", Color(0.4, 0.55, 0.65)], ["map_road", Color(0.55, 0.42, 0.3)], ["map_outpost", Color(0.9, 0.75, 0.4)], ["map_rv", Color(0.9, 0.9, 0.85)], ["map_you", Color(0.95, 0.2, 0.2)], ["map_friends", Color(0.2, 0.5, 0.95)]]:
+			var r2 := HBoxContainer.new()
+			var sw2 := ColorRect.new()
+			sw2.color = e[1]
+			sw2.custom_minimum_size = Vector2(18, 18)
+			sw2.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			r2.add_child(sw2)
+			var l2 := _label(15)
+			l2.text = T.t(e[0])
+			r2.add_child(l2)
+			leg.add_child(r2)
+		var note := _label(12, Color(0.75, 0.75, 0.7))
+		note.text = T.t("map_note")
+		note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		note.custom_minimum_size = Vector2(200, 0)
+		leg.add_child(note), Vector2(1040, 780))
+
+
+func _draw_paw(c: Control, p: Vector2, col: Color) -> void:
+	var k := Color(col.r * 0.55, col.g * 0.55, col.b * 0.55, 0.9)
+	c.draw_circle(p + Vector2(0, 3), 4.5, k)
+	for i in 4:
+		var a := -PI * 0.5 + (i - 1.5) * 0.5
+		c.draw_circle(p + Vector2(cos(a), sin(a)) * 8.0 + Vector2(0, 2), 2.0, k)

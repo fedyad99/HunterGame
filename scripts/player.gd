@@ -31,6 +31,8 @@ var raincoat := false
 var wet_vis := 0.0
 var emote := ""
 var weapon_vis := "double"
+var att_vis := ""          # обвесы текущего ружья через запятую (для модели у всех)
+var work_vis := ""         # чем занят руками (ремонт, разделка) — для анимации у всех
 var holding_big := false
 var dead := false
 var light_on := false
@@ -108,6 +110,7 @@ var target_kind := ""
 var _needs_t := 0.0
 var _rv_input_t := 0.0
 var first_person := false
+var scope_view := false
 var anchor_point := Vector3.ZERO
 var _rv_prev := Transform3D()
 var _rv_prev_ok := false
@@ -121,6 +124,13 @@ var _work := {}
 var _work_key := ""
 var _kit_t := 0.0
 var cable_point := Vector3.ZERO
+var attach := {}           # оружие -> {слот: обвес}
+var track_info := ""
+var track_info_t := 0.0
+var _track_target: Dictionary = {}
+var fire_point := Vector3.ZERO
+var _tap_item := ""
+var _tap_t := 0.0
 
 
 func setup(data: Dictionary) -> void:
@@ -139,7 +149,7 @@ func setup(data: Dictionary) -> void:
 	platform_wall_layers = 0
 	_build()
 	add_child(MU.make_sync(["sync_xform", "aim_pitch", "ragdoll", "jacket", "raincoat", "wet_vis",
-		"emote", "weapon_vis", "holding_big", "dead", "light_on", "bleeding_vis", "aim_vis", "ride", "ride_xf", "watch_view"], 0.033))
+		"emote", "weapon_vis", "att_vis", "work_vis", "holding_big", "dead", "light_on", "bleeding_vis", "aim_vis", "ride", "ride_xf", "watch_view"], 0.033))
 	set_multiplayer_authority(peer_id)
 
 
@@ -274,6 +284,12 @@ func _set_hand_prop(e: String) -> void:
 			hand_prop.add_child(MU.cyl(0.035, 0.035, 0.2, Color(0.5, 0.75, 0.95, 0.75), Vector3(0, 0.05, 0)))
 		"eat":
 			hand_prop.add_child(MU.box(Vector3(0.12, 0.05, 0.09), Color(0.45, 0.25, 0.1), Vector3(0, 0, -0.03)))
+		"t_hammer", "t_wrench", "t_cut":
+			var tool := ItemsDB.build_visual({"t_hammer": "hammer", "t_wrench": "wrench", "t_cut": "knife"}[e])
+			tool.rotation_degrees = Vector3(-90, 0, 0)
+			tool.position = Vector3(0, 0.02, -0.05)
+			tool.scale = Vector3.ONE * 0.45
+			hand_prop.add_child(tool)
 
 
 var muzzle_node: Marker3D
@@ -284,10 +300,10 @@ func _build_gun_model(w: String) -> void:
 		gun.remove_child(c)
 		c.queue_free()
 	muzzle_node = null
-	gun.set_meta("w", w)
+	gun.set_meta("w", w + "|" + att_vis)
 	if w == "":
 		return
-	var g := ItemsDB.build_gun(w)
+	var g := ItemsDB.build_gun(w, Array(att_vis.split(",", false)))
 	gun.add_child(g)
 	muzzle_node = g.get_node("Muzzle") as Marker3D
 
@@ -351,7 +367,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		_lever_drag(event.relative)
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		var sens := MOUSE_SENS * Settings.mouse_sens * (0.45 if aiming else 1.0)
+		var sens := MOUSE_SENS * Settings.mouse_sens * (0.45 if aiming else 1.0) * (0.35 if scope_view else 1.0)
 		var dy: float = event.relative.y * (-1.0 if Settings.invert_y else 1.0)
 		cam_yaw -= event.relative.x * sens
 		cam_pitch = clampf(cam_pitch - dy * sens, -1.3, 1.1)
@@ -381,10 +397,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		watch_view = not watch_view
 		watch_t = 5.0
 		Sfx.play_ui("click", -10)
-	elif event.is_action_pressed("winch_front") and seated == 0:
-		world.rpc_id(1, "req_button", "winch_front")
-	elif event.is_action_pressed("winch_rear") and seated == 0:
-		world.rpc_id(1, "req_button", "winch_rear")
+	elif event.is_action_pressed("smoke") and seated < 0 and not ragdoll:
+		smoke_cigarette()
+	elif event.is_action_pressed("attachments") and seated < 0 and cur_weapon != "":
+		world.hud.open_attachments(self)
 	elif event.is_action_pressed("toilet") and seated < 0 and not ragdoll:
 		world.hud.open_toilet(self)
 	elif event.is_action_pressed("weapon_next"):
@@ -443,6 +459,7 @@ func _owner_physics(delta: float) -> void:
 		if watch_t <= 0.0 or seated >= 0 or dead:
 			watch_view = false
 	face_cam_t = maxf(face_cam_t - delta, 0.0)
+	track_info_t = maxf(track_info_t - delta, 0.0)
 	if reload_t > 0.0:
 		reload_t -= delta
 		if reload_t <= 0.0:
@@ -473,8 +490,6 @@ func _owner_physics(delta: float) -> void:
 		was_seated = -1
 	shape.disabled = false
 	_move(delta)
-	if not ride:
-		_check_rv_hit()
 	_update_camera(delta)
 	_update_target()
 	if Input.is_action_pressed("shoot") and not world.hud.menu_open() and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -502,6 +517,9 @@ func _move(delta: float) -> void:
 	var swimming := water_depth > 1.1
 	if water_depth > 0.3:
 		speed *= 0.55
+	var sw := TerrainGen.swamp_at(global_position.x, global_position.z)
+	if sw > 0.3 and not ride:
+		speed *= lerpf(1.0, 0.5, sw)   # в болоте вязнут ноги
 	if squat_t > 0.0:
 		squat_t -= delta
 		if squat_t <= 0.0:
@@ -629,24 +647,9 @@ func _carry_factor() -> float:
 	var held: Node = world.get_held_item(peer_id)
 	var m := inv_weight() * 0.5
 	if held:
-		m += float(ItemsDB.ITEMS[held.kind].mass)
-	return clampf(1.0 - m / 260.0, 0.35, 1.0)
-
-
-func _check_rv_hit() -> void:
-	var rv: Node3D = world.rv
-	if rv == null:
-		return
-	var v: Vector3 = rv.sync_vel
-	if v.length() < 5.0:
-		return
-	var local: Vector3 = rv.global_transform.affine_inverse() * (global_position + Vector3.UP * 0.9)
-	if absf(local.x) < 1.7 and local.z > RV.REAR_Z - 0.3 and local.z < 4.6 and local.y > -0.5 and local.y < 4.2:
-		hp -= v.length() * 1.2
-		bleed += 0.3
-		start_ragdoll(v * 1.1 + Vector3.UP * 6.0, 3.5)
-		world.sfx_all("thud", global_position, 3.0, 0.7)
-		world.broadcast(T.t("msg_hit_by_rv", [nick]))
+		# вдвоём-втроём груз делится
+		m += float(ItemsDB.ITEMS[held.kind].mass) / maxf(float(held.holders.size()), 1.0) * 1.6
+	return clampf(1.0 - m / 200.0, 0.3, 1.0)
 
 
 func _seated_update(delta: float) -> void:
@@ -717,6 +720,7 @@ func _update_camera(delta: float) -> void:
 	var side := 0.85          # камера «через правое плечо», как в экшенах от 3-го лица
 	var fov: float = Settings.fov
 	first_person = false
+	scope_view = false
 	if dead or ragdoll:
 		if flop:
 			focus = flop.global_position + Vector3.UP * 0.6
@@ -739,18 +743,32 @@ func _update_camera(delta: float) -> void:
 		# внутри дома тесно: камера ближе
 		arm = 1.7
 		side = 0.35
-	elif aiming:
-		arm = 1.55
-		side = 0.75
-		focus = global_position + Vector3.UP * 1.6
-		fov = float(ItemsDB.WEAPONS[cur_weapon].zoom) * Settings.fov / 72.0 if cur_weapon != "" else fov
+	elif aiming and cur_weapon != "":
+		var om := optic_mode()
+		var oz := float(ItemsDB.ATTACH[attached("optic")].zoom) if om != "" else float(ItemsDB.WEAPONS[cur_weapon].zoom)
+		if om == "scope" and draw_t > 0.9:
+			# в оптику: камера у глаза, своя модель скрыта, на экране — сетка прицела
+			first_person = true
+			scope_view = true
+			focus = global_position + Vector3.UP * 1.58
+			arm = 0.0
+			side = 0.0
+		elif om == "dot":
+			arm = 0.95
+			side = 0.42
+			focus = global_position + Vector3.UP * 1.6
+		else:
+			arm = 1.55
+			side = 0.75
+			focus = global_position + Vector3.UP * 1.6
+		fov = oz * Settings.fov / 72.0
 	cam_pivot.global_position = cam_pivot.global_position.lerp(focus, clampf(delta * 22.0, 0, 1)) if (cam_pivot.global_position.distance_to(focus) < 4.0 and not first_person) else focus
 	var tt := Time.get_ticks_msec() * 0.001
 	var dr := drunk / 100.0
 	cam_pivot.rotation = Vector3(cam_pitch + sin(tt * 0.7) * dr * 0.08, cam_yaw + sin(tt * 0.5) * dr * 0.1, sin(tt * 0.9) * dr * 0.18)
 	fov += sin(tt * 1.7) * dr * 8.0
 	spring.spring_length = arm if first_person else lerpf(spring.spring_length, arm, clampf(delta * 8.0, 0, 1))
-	cam.position.x = lerpf(cam.position.x, side, clampf(delta * 8.0, 0, 1))
+	cam.position.x = side if first_person else lerpf(cam.position.x, side, clampf(delta * 8.0, 0, 1))
 	cam.fov = lerpf(cam.fov, fov, clampf(delta * 10.0, 0, 1))
 	cam.near = 0.05
 	model.visible = not first_person and (spring.get_hit_length() > 0.8 or seated >= 0)
@@ -777,6 +795,20 @@ func _update_target() -> void:
 			target_kind = n.get_meta("kind")
 	if target_node == null and TerrainGen.WATER - global_position.y > 0.05 and seated < 0:
 		target_kind = "water"
+	# земля под ногами: след зверя или место для костра
+	if target_node == null and target_kind == "" and seated < 0 and not ride:
+		var q3 := PhysicsRayQueryParameters3D.create(start, start + fwd * 4.0, MU.L_WORLD, [get_rid()])
+		var r3 := get_world_3d().direct_space_state.intersect_ray(q3)
+		if not r3.is_empty() and r3.normal.y > 0.7:
+			var held3: Node = world.get_held_item(peer_id)
+			if held3 and held3.kind == "firewood":
+				target_kind = "ground_fire"
+				fire_point = r3.position
+			else:
+				var tr: Dictionary = world.wild.track_near(r3.position, 0.6)
+				if not tr.is_empty():
+					target_kind = "track"
+					_track_target = tr
 	if seated == 0 and (lever_grab or _lever_aimed()):
 		target_kind = "rv_lever"
 	cable_ok = false
@@ -791,7 +823,7 @@ func _update_target() -> void:
 			cable_far = not cable_ok
 			cable_item = ""
 			var hit_it := r2.collider as Item
-			if hit_it != null and ItemsDB.ITEMS[hit_it.kind].get("big", false):
+			if hit_it != null and ItemsDB.is_heavy(hit_it.kind):
 				cable_item = hit_it.name
 		target_kind = "cable_place" if not r2.is_empty() else "cable_hold"
 
@@ -804,9 +836,25 @@ func get_prompt() -> String:
 		if target_kind == "rv_button":
 			return T.t("prompt_button", [T.t("btn_" + str(target_node.get_meta("action")))])
 		return T.t("prompt_seated_fp")
+	if track_info_t > 0.0 and (target_kind == "track" or target_kind == ""):
+		return track_info
+	var waiting: Node = _waiting_item()
+	if waiting and held == null:
+		var need: int = ItemsDB.lifters_needed(waiting.kind) - waiting.holders.size()
+		return T.t("prompt_wait_helpers", [ItemsDB.item_name(waiting.kind), need])
 	match target_kind:
 		"item":
-			return T.t("prompt_take", [ItemsDB.item_name(target_node.kind)])
+			var k: String = target_node.kind
+			var nm := ItemsDB.item_name(k)
+			var cut := ""
+			if ItemsDB.FIELD_CUT.has(k):
+				cut = "  " + (T.t("prompt_field_cut") if inv_has("knife") else T.t("prompt_need_knife"))
+			if ItemsDB.is_heavy(k):
+				var need2 := ItemsDB.lifters_needed(k)
+				if need2 > 1:
+					return T.t("prompt_lift_team", [nm, need2]) + cut
+				return T.t("prompt_take_hands", [nm]) + cut
+			return T.t("prompt_take", [nm])
 		"rv_seat":
 			var si := int(target_node.get_meta("seat"))
 			if world.rv and world.rv.seats[si] != 0 and world.rv.seats[si] != peer_id:
@@ -824,6 +872,8 @@ func get_prompt() -> String:
 			return T.t("prompt_hook_detach")
 		"rv_ladder":
 			return T.t("prompt_ladder_up") if global_position.y < world.rv.global_position.y + 3.0 else T.t("prompt_ladder_down")
+		"rv_glovebox":
+			return T.t("prompt_glovebox")
 		"cable_place":
 			return (T.t("prompt_cable_item") if cable_item != "" else T.t("prompt_cable_attach")) if cable_ok else T.t("prompt_cable_far")
 		"cable_hold":
@@ -831,22 +881,29 @@ func get_prompt() -> String:
 		"rv_stove", "campfire":
 			if held and held.kind == "firewood":
 				return T.t("prompt_add_wood")
-			return T.t("prompt_cook") if inv_has("meat_raw") else T.t("prompt_need_meat")
+			return T.t("prompt_cook") if _cookable() != "" else T.t("prompt_need_meat")
+		"fire":
+			var f := target_node.get_parent() as Fire
+			if held and held.kind == "firewood":
+				return T.t("prompt_add_wood")
+			if f and not f.lit:
+				return T.t("prompt_fire_light") if inv_has("matches") else T.t("prompt_need_matches")
+			return T.t("prompt_cook") if _cookable() != "" else T.t("prompt_fire_burning")
+		"ground_fire":
+			return T.t("prompt_build_fire")
 		"rv_butcher", "butcher":
-			return T.t("prompt_butcher") if held and str(held.kind).begins_with("carcass_") else T.t("prompt_need_carcass")
+			return T.t("prompt_butcher") if held and ItemsDB.BUTCHER.has(str(held.kind)) else T.t("prompt_need_carcass")
 		"rv_wardrobe":
 			return T.t("prompt_wardrobe")
 		"rv_engine", "rv_body":
 			var pk := "engine" if target_kind == "rv_engine" else "body"
 			var ph: float = world.rv.hp if pk == "engine" else world.rv.hp_body
-			if inv_has("repair_kit") and ph < 99.9:
-				return T.t("prompt_repair_hold", [T.t("part_" + pk), int(ph)])
-			return T.t("prompt_part_ok", [T.t("part_" + pk), int(ph)])
+			return _repair_prompt(pk, ph)
 		"rv_fuel":
 			if held and held.kind == "jerrycan":
 				return T.t("prompt_refuel_hold", [int(world.rv.fuel), int(world.rv.max_fuel)]) if held.q > 0.01 else T.t("prompt_can_empty", [int(world.rv.fuel), int(world.rv.max_fuel)])
-			if inv_has("repair_kit") and world.rv.hp_tank < 99.9:
-				return T.t("prompt_repair_hold", [T.t("part_tank"), int(world.rv.hp_tank)])
+			if world.rv.hp_tank < 99.9:
+				return _repair_prompt("tank", world.rv.hp_tank)
 			return T.t("prompt_fuel_state", [int(world.rv.fuel), int(world.rv.max_fuel)])
 		"rv_wheel":
 			return _wheel_prompt()
@@ -857,7 +914,11 @@ func get_prompt() -> String:
 		"rv_locker":
 			return T.t("prompt_locker")
 		"rv_rack":
-			return T.t("prompt_rack_put") if held and ItemsDB.ITEMS[held.kind].get("big", false) else T.t("prompt_rack_hint")
+			return T.t("prompt_rack_put") if held and ItemsDB.is_heavy(held.kind) else T.t("prompt_rack_hint")
+		"berry_bush":
+			return T.t("prompt_berries") if world.wild.bush_has_berries(int(target_node.get_meta("bush"))) else T.t("prompt_no_berries")
+		"track":
+			return T.t("prompt_track")
 		"shop":
 			return T.t("prompt_shop")
 		"pump":
@@ -871,6 +932,53 @@ func get_prompt() -> String:
 	return ""
 
 
+func _waiting_item() -> Node:
+	return world.get_waiting_item(peer_id)
+
+
+## Что из рюкзака можно приготовить (сырое мясо, съедобные грибы).
+func _cookable() -> String:
+	for e in inventory:
+		if ItemsDB.COOK.has(str(e.kind)):
+			return str(e.kind)
+	return ""
+
+
+## Можно ли разделать ножом то, на что смотрим.
+func _field_cut_possible() -> bool:
+	return target_kind == "item" and target_node != null and ItemsDB.FIELD_CUT.has(str(target_node.kind)) and inv_has("knife") and target_node.holder == 0
+
+
+## Подходящий способ ремонта части: {"key": ключ в REPAIRS} или пусто + что не хватает.
+func _repair_way(part: String) -> Dictionary:
+	var keys := ["tank", "tank_tape"] if part == "tank" else [part]
+	var missing := ""
+	for k in keys:
+		var r: Dictionary = ItemsDB.REPAIRS[k]
+		var tool := str(r.tool)
+		var use := str(r.use)
+		if tool != "" and not inv_has(tool):
+			missing = tool if missing == "" else missing
+			continue
+		if use != "" and not inv_has(use):
+			missing = use if missing == "" else missing
+			continue
+		return {"key": k}
+	return {"missing": missing}
+
+
+func _repair_prompt(part: String, hp_now: float) -> String:
+	if hp_now >= 99.9:
+		return T.t("prompt_part_ok", [T.t("part_" + part), int(hp_now)])
+	var way := _repair_way(part)
+	if way.has("key"):
+		var cap := float(ItemsDB.REPAIRS[way.key].cap)
+		if hp_now >= cap - 0.1:
+			return T.t("prompt_part_capped", [T.t("part_" + part), int(hp_now)])
+		return T.t("prompt_repair_with", [T.t("part_" + part), int(hp_now), ItemsDB.item_name(str(ItemsDB.REPAIRS[way.key].tool if ItemsDB.REPAIRS[way.key].tool != "" else ItemsDB.REPAIRS[way.key].use))])
+	return T.t("prompt_repair_need", [T.t("part_" + part), int(hp_now), ItemsDB.item_name(str(way.missing))])
+
+
 func _interact() -> void:
 	var rv: RV = world.rv
 	if seated >= 0:
@@ -879,14 +987,20 @@ func _interact() -> void:
 		else:
 			world.rpc_id(1, "req_exit")
 		return
+	if _waiting_item() and world.get_held_item(peer_id) == null and target_kind != "item":
+		world.rpc_id(1, "req_drop")   # передумал ждать помощи
+		return
 	match target_kind:
 		"item":
 			var kind: String = target_node.kind
-			var big: bool = ItemsDB.ITEMS[kind].get("big", false)
-			if not big and can_add(kind):
+			if _field_cut_possible():
+				_tap_item = target_node.name   # короткое нажатие — взять, удержание — разделать (см. _work_poll)
+				_tap_t = 0.0
+				return
+			if not ItemsDB.is_heavy(kind) and can_add(kind):
 				world.rpc_id(1, "req_pickup", target_node.name)
 			else:
-				if not big:
+				if not ItemsDB.is_heavy(kind):
 					world.hud.add_msg(T.t("msg_inv_full"))
 				world.rpc_id(1, "req_grab", target_node.name)
 		"rv_seat":
@@ -895,6 +1009,8 @@ func _interact() -> void:
 			world.rpc_id(1, "req_button", str(target_node.get_meta("action")))
 		"rv_hook":
 			world.rpc_id(1, "req_hook", int(target_node.get_meta("hook")))
+		"rv_glovebox":
+			world.hud.open_map(self)
 		"cable_place":
 			if cable_ok and rv:
 				world.rpc_id(1, "req_attach", rv.cable_holder_of(peer_id), cable_point, cable_item)
@@ -912,12 +1028,21 @@ func _interact() -> void:
 			world.hud.open_shop(self, int(target_node.get_meta("shop_idx")))
 		"water":
 			_drink_lake()
-		"rv_stove", "campfire":
+		"rv_stove", "campfire", "fire":
 			var held: Node = world.get_held_item(peer_id)
 			if held and held.kind == "firewood":
 				world.rpc_id(1, "req_station", target_node.get_path(), "")
-			elif inv_remove("meat_raw"):
-				world.rpc_id(1, "req_station", target_node.get_path(), "meat_raw")
+				return
+			if target_kind == "fire":
+				var f := target_node.get_parent() as Fire
+				if f and not f.lit:
+					return   # разжечь — удержанием E
+			var ck := _cookable()
+			if ck != "" and inv_remove(ck):
+				world.rpc_id(1, "req_station", target_node.get_path(), ck)
+				work_flash("cook")
+		"ground_fire":
+			world.rpc_id(1, "req_build_fire", fire_point, false)
 		"rv_fridge":
 			world.hud.open_storage(self, "fridge")
 		"rv_shelf":
@@ -926,13 +1051,48 @@ func _interact() -> void:
 			world.hud.open_storage(self, "locker")
 		"rv_rack":
 			world.rpc_id(1, "req_rack")
+		"berry_bush":
+			var bi := int(target_node.get_meta("bush"))
+			if world.wild.bush_has_berries(bi):
+				world.wild.rpc_id(1, "req_forage", bi)
+				work_flash("pick")
+		"track":
+			var tr: Dictionary = _track_target
+			if not tr.is_empty():
+				track_info = world.wild.inspect(tr)
+				track_info_t = 9.0
+				Sfx.play_ui("click", -10)
+		"rv_butcher", "butcher":
+			world.rpc_id(1, "req_station", target_node.get_path(), "")
+			work_flash("cut")
 		"rv_engine", "rv_body", "rv_fuel", "rv_wheel", "pump", "", "cable_hold":
 			pass   # длительные работы — удержанием E, см. _work_poll
 		_:
 			world.rpc_id(1, "req_station", target_node.get_path(), "")
 
 
-## number_two = false — по-маленькому (стоя), true — по-большому (присев).
+## Короткая анимация рук (у всех): срезать, сорвать, положить на сковороду.
+var _work_flash_t := 0.0
+
+
+func work_flash(kind: String) -> void:
+	work_vis = kind
+	_work_flash_t = 1.2
+
+
+@rpc("any_peer", "call_local", "reliable")
+func use_match() -> void:
+	if not is_multiplayer_authority():
+		return
+	for i in inventory.size():
+		if inventory[i].kind == "matches":
+			inventory[i].q = float(inventory[i].q) - 1.0
+			if inventory[i].q <= 0.0:
+				inventory.remove_at(i)
+			return
+
+
+## Подсказка у колеса: домкрат, болты (ключ), заплатка.
 func _wheel_prompt() -> String:
 	var rv: RV = world.rv
 	var wi := int(target_node.get_meta("wheel"))
@@ -940,91 +1100,143 @@ func _wheel_prompt() -> String:
 	var held: Node = world.get_held_item(peer_id)
 	if rv.jack_i == wi and rv.jack_t > 0.99:
 		if st == 2:
-			return T.t("prompt_wheel_mount") if held and held.kind == "spare_wheel" else T.t("prompt_wheel_need_spare")
-		return T.t("prompt_wheel_unbolt") if st == 1 else T.t("prompt_jack_down")
+			if not (held and held.kind == "spare_wheel"):
+				return T.t("prompt_wheel_need_spare")
+			return T.t("prompt_wheel_mount") if inv_has("wrench") else T.t("prompt_need_tool", [ItemsDB.item_name("wrench")])
+		if st == 1:
+			return T.t("prompt_wheel_unbolt") if inv_has("wrench") else T.t("prompt_need_tool", [ItemsDB.item_name("wrench")])
+		return T.t("prompt_jack_down")
 	if rv.jack_i >= 0:
 		return ""
 	if st == 1:
+		if inv_has("tire_patch"):
+			return T.t("prompt_wheel_patch")
 		return T.t("prompt_wheel_jack") if inv_has("jack") else T.t("prompt_wheel_flat")
-	if inv_has("repair_kit") and float(rv.wheel_hp[wi]) < 99.9:
-		return T.t("prompt_repair_hold", [T.t("part_wheel"), int(rv.wheel_hp[wi])])
+	if float(rv.wheel_hp[wi]) < 99.9:
+		return _repair_prompt("wheel", float(rv.wheel_hp[wi]))
 	return T.t("prompt_wheel_state", [int(rv.wheel_hp[wi])])
 
 
 ## Что делает удержание E на текущей цели: {kind, idx, extra} или пусто.
 func _work_for_target() -> Dictionary:
+	if target_node == null or seated >= 0:
+		return {}
+	if target_kind == "fire":
+		var f := target_node.get_parent() as Fire
+		var held0: Node = world.get_held_item(peer_id)
+		if f and not f.lit and inv_has("matches") and held0 == null:
+			return {"kind": "fire_light", "idx": 0, "extra": {"target": str(f.name)}, "anim": "light"}
+		return {}
 	var rv: RV = world.rv
-	if rv == null or target_node == null or seated >= 0:
+	if rv == null:
 		return {}
 	var held: Node = world.get_held_item(peer_id)
 	match target_kind:
 		"rv_fuel":
 			if held and held.kind == "jerrycan" and held.q > 0.01 and rv.fuel < rv.max_fuel - 0.1:
-				return {"kind": "refuel", "idx": 0, "extra": {}}
-			if inv_has("repair_kit") and rv.hp_tank < 99.9:
-				return {"kind": "repair", "idx": 0, "extra": {"part": "tank"}}
+				return {"kind": "refuel", "idx": 0, "extra": {}, "anim": "pour"}
+			return _repair_job("tank", rv.hp_tank, 0)
 		"rv_engine":
-			if inv_has("repair_kit") and rv.hp < 99.9:
-				return {"kind": "repair", "idx": 0, "extra": {"part": "engine"}}
+			return _repair_job("engine", rv.hp, 0)
 		"rv_body":
-			if inv_has("repair_kit") and rv.hp_body < 99.9:
-				return {"kind": "repair", "idx": 0, "extra": {"part": "body"}}
+			return _repair_job("body", rv.hp_body, 0)
 		"pump":
-			return {"kind": "pump", "idx": 0, "extra": {"pos": target_node.global_position}}
+			return {"kind": "pump", "idx": 0, "extra": {"pos": target_node.global_position}, "anim": "pour"}
 		"rv_wheel":
 			var wi := int(target_node.get_meta("wheel"))
 			var st := int(rv.wheel_state[wi])
 			if rv.jack_i == wi and rv.jack_t > 0.99:
 				if st == 2:
-					if held and held.kind == "spare_wheel":
-						return {"kind": "mount", "idx": wi, "extra": {}}
+					if held and held.kind == "spare_wheel" and inv_has("wrench"):
+						return {"kind": "mount", "idx": wi, "extra": {}, "anim": "wrench"}
 				elif st == 1:
-					return {"kind": "unbolt", "idx": wi, "extra": {}}
+					if inv_has("wrench"):
+						return {"kind": "unbolt", "idx": wi, "extra": {}, "anim": "wrench"}
 				else:
-					return {"kind": "jack_down", "idx": wi, "extra": {}}
+					return {"kind": "jack_down", "idx": wi, "extra": {}, "anim": "jack"}
 			elif rv.jack_i < 0:
+				if st == 1 and inv_has("tire_patch"):
+					return {"kind": "patch", "idx": wi, "extra": {}, "anim": "work", "use": "tire_patch", "use_s": 4.0}
 				if st == 1 and inv_has("jack"):
-					return {"kind": "jack_up", "idx": wi, "extra": {}}
-				if st == 0 and inv_has("repair_kit") and float(rv.wheel_hp[wi]) < 99.9:
-					return {"kind": "repair", "idx": wi, "extra": {"part": "wheel"}}
+					return {"kind": "jack_up", "idx": wi, "extra": {}, "anim": "jack"}
+				if st == 0:
+					return _repair_job("wheel", float(rv.wheel_hp[wi]), wi)
 	return {}
 
 
+func _repair_job(part: String, hp_now: float, idx: int) -> Dictionary:
+	if hp_now >= 99.9:
+		return {}
+	var way := _repair_way(part)
+	if not way.has("key"):
+		return {}
+	var r: Dictionary = ItemsDB.REPAIRS[way.key]
+	if hp_now >= float(r.cap) - 0.1:
+		return {}
+	var anim := {"body": "hammer", "engine": "wrench", "tank": "wrench", "tank_tape": "work", "wheel": "work"}.get(str(way.key), "work") as String
+	return {"kind": "repair", "idx": idx, "extra": {"part": part, "way": way.key}, "anim": anim,
+		"use": str(r.use), "use_s": float(r.get("use_s", 0.0))}
+
+
 func _work_poll(delta: float) -> void:
-	var want := _work_for_target() if not world.hud.menu_open() else {}
-	var key := "" if want.is_empty() else "%s|%d|%s" % [want.kind, want.idx, str(want.extra.get("part", ""))]
 	var pressed := Input.is_action_pressed("interact")
+	if _work_flash_t > 0.0:
+		_work_flash_t -= delta
+		if _work_flash_t <= 0.0 and _work.is_empty():
+			work_vis = ""
+	# короткое нажатие на тушу — взять, удержание с ножом — разделать
+	if _tap_item != "":
+		_tap_t += delta
+		if not pressed:
+			var it: Node = world.entities.get_node_or_null(_tap_item)
+			_tap_item = ""
+			if it:
+				world.rpc_id(1, "req_grab", it.name)
+			return
+		if _tap_t > 0.35:
+			_work = {"kind": "field_cut", "idx": 0, "extra": {"target": _tap_item}, "anim": "cut"}
+			_work_key = "field_cut|" + _tap_item
+			_tap_item = ""
+			work_vis = "cut"
+			world.rpc_id(1, "req_work", "field_cut", 0, true, _work.extra)
+		return
+	var want := _work_for_target() if not world.hud.menu_open() else {}
+	var key := "" if want.is_empty() else "%s|%d|%s" % [want.kind, want.idx, str(want.extra.get("part", want.extra.get("target", "")))]
 	if not _work.is_empty():
-		var keep: bool = pressed and key == _work_key
+		var keep: bool = pressed and (key == _work_key or (_work.kind == "field_cut" and target_kind == "item"))
 		# jack_up/unbolt и т.п. заканчивает хост; мы просто ждём, пока клавишу отпустят
 		if not keep:
 			world.rpc_id(1, "req_work", _work.kind, _work.idx, false, {})
 			_work = {}
 			_work_key = ""
-		elif _work.kind == "repair":
+			work_vis = ""
+		elif str(_work.get("use", "")) != "":
 			_kit_t += delta
 			if _kit_t >= 0.25:
-				_use_kit(_kit_t)
+				_use_consumable(str(_work.use), _kit_t / maxf(float(_work.get("use_s", 5.0)), 0.5))
 				_kit_t = 0.0
 		return
 	if pressed and Input.is_action_just_pressed("interact") and not want.is_empty():
 		_work = want
 		_work_key = key
 		_kit_t = 0.0
+		work_vis = str(want.get("anim", "work"))
 		world.rpc_id(1, "req_work", want.kind, want.idx, true, want.extra)
 
 
-## Ремкомплект расходуется, пока идёт ремонт: полный комплект на ~10 секунд работы.
-func _use_kit(dt: float) -> void:
+## Расходник тратится, пока идёт работа (полный — на use_s секунд). Закончился — работа встаёт.
+func _use_consumable(kind: String, frac: float) -> void:
 	for i in inventory.size():
-		if inventory[i].kind == "repair_kit":
-			inventory[i].q = float(inventory[i].q) - dt / 10.0
+		if inventory[i].kind == kind:
+			inventory[i].q = float(inventory[i].q) - frac
 			if inventory[i].q <= 0.0:
 				inventory.remove_at(i)
-				world.hud.add_msg(T.t("msg_need_kit"))
-				world.rpc_id(1, "req_work", "repair", 0, false, {})
-				_work = {}
-				_work_key = ""
+				if not inv_has(kind):
+					world.hud.add_msg(T.t("msg_used_up", [ItemsDB.item_name(kind)]))
+					world.rpc_id(1, "req_work", str(_work.kind), int(_work.idx), false, {})
+					_work = {}
+					_work_key = ""
+					work_vis = ""
 			return
 
 
@@ -1046,9 +1258,10 @@ func recv_store_item(entry: Dictionary) -> void:
 		Sfx.play_ui("pickup", -6)
 	else:
 		world.hud.add_msg(T.t("msg_inv_full"))
-		world.rpc_id(1, "req_spawn_item", k, float(entry.get("q", 1.0)), global_position + Vector3.UP * 1.2 - global_basis.z * 0.8, Vector3.ZERO)
+		world.rpc_id(1, "req_spawn_item", k, float(entry.get("q", 1.0)), global_position + Vector3.UP * 1.2 - global_basis.z * 0.8, Vector3.ZERO, float(entry.get("age", 0.0)))
 
 
+## number_two = false — по-маленькому (стоя), true — по-большому (присев).
 func do_toilet(number_two: bool) -> void:
 	if emote in ACTION_EMOTES:
 		return
@@ -1096,6 +1309,8 @@ func inv_weight() -> float:
 
 
 func can_add(kind: String) -> bool:
+	if ItemsDB.is_heavy(kind):
+		return false   # тяжёлое — только в руках
 	return inventory.size() < MAX_SLOTS and inv_weight() + float(ItemsDB.ITEMS[kind].mass) <= MAX_WEIGHT
 
 
@@ -1115,15 +1330,15 @@ func inv_remove(kind: String) -> bool:
 
 
 @rpc("any_peer", "call_local", "reliable")
-func inv_add(kind: String, q: float) -> void:
+func inv_add(kind: String, q: float, age := 0.0) -> void:
 	if not is_multiplayer_authority():
 		return
 	if can_add(kind):
-		inventory.append({"kind": kind, "q": q})
+		inventory.append({"kind": kind, "q": q, "age": age})
 		Sfx.play_ui("pickup", -6)
 	else:
 		# не влезло — бросаем обратно
-		world.rpc_id(1, "req_spawn_item", kind, q, global_position + Vector3.UP * 1.2 - global_basis.z * 0.8, Vector3.ZERO)
+		world.rpc_id(1, "req_spawn_item", kind, q, global_position + Vector3.UP * 1.2 - global_basis.z * 0.8, Vector3.ZERO, age)
 
 
 func use_slot(i: int) -> void:
@@ -1154,6 +1369,10 @@ func use_slot(i: int) -> void:
 			inventory.remove_at(i)
 			_consume(e.kind)
 			_do_action("vodka" if e.kind == "vodka" else "beer")
+		"attach":
+			if not attach_from_inv(i):
+				world.hud.add_msg(T.t("msg_cant_attach"))
+				Sfx.play_ui("click", -14)
 		"equip":
 			_select_weapon(str(def.weapon))
 			world.hud.add_msg(T.t("weapon_" + str(def.weapon)))
@@ -1173,7 +1392,14 @@ func drop_slot(i: int) -> void:
 	var e: Dictionary = inventory[i]
 	inventory.remove_at(i)
 	var fwd := -global_basis.z
-	world.rpc_id(1, "req_spawn_item", e.kind, float(e.q), global_position + Vector3.UP * 1.2 + fwd * 0.7, fwd * 2.0)
+	world.rpc_id(1, "req_spawn_item", e.kind, float(e.q), global_position + Vector3.UP * 1.2 + fwd * 0.7, fwd * 2.0, float(e.get("age", 0.0)))
+	# снятое ружьё отдаёт обвесы обратно в рюкзак
+	if ItemsDB.ITEMS[e.kind].has("weapon"):
+		var w := str(ItemsDB.ITEMS[e.kind].weapon)
+		for sl in weapon_attach(w).keys():
+			inv_add(str(weapon_attach(w)[sl]), 1.0)
+		attach.erase(w)
+		_update_att_vis()
 
 
 func _consume(kind: String, fresh := 0) -> void:
@@ -1194,6 +1420,10 @@ func _consume(kind: String, fresh := 0) -> void:
 	if randf() < float(f.get("poison", 0.0)):
 		poison += 40.0
 		world.hud.add_msg(T.t("msg_poisoned"))
+	if f.has("poison_hit"):
+		# ядовитые грибы и ягоды: отравление сразу, мухомор ещё и «вставляет»
+		poison += float(f.poison_hit)
+		world.hud.add_msg(T.t("msg_poisoned"))
 	var snd := "drink" if ItemsDB.ITEMS[kind].get("use", "") == "drink" else "eat"
 	world.sfx_all(snd, global_position, -4.0, 1.0)
 
@@ -1213,6 +1443,7 @@ func _check_weapon_valid() -> void:
 	if (cur_weapon != "" and not inv_has("weapon_" + cur_weapon)) or (cur_weapon == "" and not o.is_empty()):
 		cur_weapon = o[0] if not o.is_empty() else ""
 		weapon_vis = cur_weapon
+		_update_att_vis()
 		reload_t = 0.0
 
 
@@ -1221,8 +1452,81 @@ func _select_weapon(w: String) -> void:
 		return
 	cur_weapon = w
 	weapon_vis = w
+	_update_att_vis()
 	reload_t = 0.0
 	Sfx.play_ui("click", -6)
+
+
+# ---- обвесы (T)
+func weapon_attach(w: String) -> Dictionary:
+	if not attach.has(w):
+		attach[w] = {}
+	return attach[w]
+
+
+func _update_att_vis() -> void:
+	var a: Array = []
+	if cur_weapon != "":
+		for sl in ItemsDB.ATTACH_SLOTS:
+			var k := str(weapon_attach(cur_weapon).get(sl, ""))
+			if k != "":
+				a.append(k)
+	att_vis = ",".join(PackedStringArray(a))
+
+
+func attached(slot: String) -> String:
+	return str(weapon_attach(cur_weapon).get(slot, "")) if cur_weapon != "" else ""
+
+
+## Режим прицеливания по оптике: "scope", "dot" или "".
+func optic_mode() -> String:
+	var o := attached("optic")
+	return str(ItemsDB.ATTACH[o].get("mode", "")) if o != "" else ""
+
+
+func can_attach(kind: String, w: String) -> bool:
+	return ItemsDB.ATTACH.has(kind) and w in ItemsDB.ATTACH[kind].fits
+
+
+## Поставить обвес из рюкзака на текущее ружьё (старый в том же слоте — обратно в рюкзак).
+func attach_from_inv(i: int) -> bool:
+	if i < 0 or i >= inventory.size() or cur_weapon == "":
+		return false
+	var k := str(inventory[i].kind)
+	if not can_attach(k, cur_weapon):
+		return false
+	var sl := str(ItemsDB.ATTACH[k].slot)
+	inventory.remove_at(i)
+	var wa := weapon_attach(cur_weapon)
+	var old := str(wa.get(sl, ""))
+	wa[sl] = k
+	if old != "":
+		inv_add(old, 1.0)
+	_update_att_vis()
+	Sfx.play_ui("reload", -6)
+	return true
+
+
+func detach(slot: String) -> void:
+	if cur_weapon == "":
+		return
+	var wa := weapon_attach(cur_weapon)
+	var k := str(wa.get(slot, ""))
+	if k == "":
+		return
+	wa.erase(slot)
+	inv_add(k, 1.0)
+	_update_att_vis()
+	Sfx.play_ui("reload", -8)
+
+
+func smoke_cigarette() -> void:
+	for i in inventory.size():
+		if inventory[i].kind == "cigarettes":
+			use_slot(i)
+			return
+	world.hud.add_msg(T.t("msg_no_cigs"))
+	Sfx.play_ui("click", -14)
 
 
 func _cycle_weapon(d: int) -> void:
@@ -1304,10 +1608,18 @@ func _on_shoot_pressed() -> void:
 	var aim_point: Vector3 = r.position if not r.is_empty() else from + fwd * 600.0
 	var muzzle: Vector3 = muzzle_node.global_position if is_instance_valid(muzzle_node) else gun.global_position
 	var dir := (aim_point - muzzle).normalized()
-	world.rpc_id(1, "req_shoot", muzzle, dir, mag_type[cur_weapon], w.snd)
-	# отдача
-	cam_pitch = minf(cam_pitch + float(w.recoil) * 0.02, 1.1)
-	cam_yaw += randf_range(-1, 1) * float(w.recoil) * 0.006
+	var loud := 1.0
+	var sup := attached("muzzle")
+	if sup != "":
+		loud = float(ItemsDB.ATTACH[sup].get("loud", 1.0))
+	world.rpc_id(1, "req_shoot", muzzle, dir, mag_type[cur_weapon], w.snd, loud)
+	# отдача (сошки гасят её, если стоишь на месте)
+	var rk := 1.0
+	var bp := attached("under")
+	if bp != "" and Vector2(velocity.x, velocity.z).length() < 0.5:
+		rk = float(ItemsDB.ATTACH[bp].get("recoil", 1.0))
+	cam_pitch = minf(cam_pitch + float(w.recoil) * 0.02 * rk, 1.1)
+	cam_yaw += randf_range(-1, 1) * float(w.recoil) * 0.006 * rk
 	var kick := float(w.kick)
 	velocity -= fwd * kick * (3.0 if not is_on_floor() else 1.0)
 	if mag[cur_weapon] <= 0:
@@ -1556,13 +1868,16 @@ func _animate(delta: float) -> void:
 	var seat_i := _seat_index()
 	raincoat_mi.visible = raincoat
 	cm.set_jacket(jacket)
-	if gun.get_meta("w", "x") != weapon_vis:
+	if gun.get_meta("w", "x") != weapon_vis + "|" + att_vis:
 		_build_gun_model(weapon_vis)
 	flashlight.visible = light_on and not dead
 	drips.emitting = wet_vis > 45.0 and not dead
 	smoke_fx.emitting = emote == "smoke" and fmod(emote_t, 2.3) > 1.0 and fmod(emote_t, 2.3) < 1.9
 	pee_fx.emitting = emote == "pee" and emote_t > 0.6 and emote_t < 2.9
-	_set_hand_prop(emote if emote in ["smoke", "beer", "vodka", "drink", "eat"] else "")
+	var prop := emote if emote in ["smoke", "beer", "vodka", "drink", "eat"] else ""
+	if prop == "" and work_vis in ["hammer", "wrench", "cut"]:
+		prop = "t_" + work_vis
+	_set_hand_prop(prop)
 	if not is_multiplayer_authority():
 		name_label.visible = not dead
 	if bleeding_vis and delta > 0.0 and seat_i < 0:
@@ -1600,6 +1915,15 @@ func _animate(delta: float) -> void:
 				hold_hands = emote
 		if not emote in LOOP_EMOTES and not emote in ACTION_EMOTES and emote != "squat" and emote_t > 3.5 and is_multiplayer_authority():
 			emote = ""
+	elif work_vis != "" and anim_speed < 1.0:
+		show_gun = false
+		# низкая работа (колесо, туша, домкрат) — на корточках
+		if work_vis in ["cut", "wrench", "work", "jack", "pick", "light"]:
+			cm.hold("SitDown", sit_len * 0.45)
+			head_pitch = 0.45
+		else:
+			cm.play("Idle")
+		hold_hands = "w_" + work_vis
 	elif holding_big:
 		if anim_speed > 1.0:
 			cm.play("Run_Carry" if anim_speed > 5.0 else "Walk_Carry", clampf(anim_speed / (6.5 if anim_speed > 5.0 else 3.4), 0.5, 1.6))
@@ -1652,6 +1976,22 @@ func _animate(delta: float) -> void:
 		"drink", "beer", "vodka":
 			cm.pose_arm("R", Vector3(0.3, -0.4, -0.8), Vector3(-0.2, 1.0, -0.2))
 			head_pitch = -0.55
+		"w_hammer":
+			var sw := sin(Time.get_ticks_msec() * 0.012)
+			cm.pose_arm("R", Vector3(0.3, 0.2 + sw * 0.6, -0.8).normalized(), Vector3(0.0, -0.2 - sw * 0.8, -1.0).normalized())
+			cm.pose_arm("L", Vector3(-0.2, -0.4, -0.8), Vector3(0.1, -0.3, -1))
+		"w_wrench", "w_jack":
+			var sw2 := sin(Time.get_ticks_msec() * (0.009 if work_vis == "w_wrench" else 0.006))
+			cm.pose_arm("R", Vector3(0.2, -0.55 + sw2 * 0.2, -0.8), Vector3(0.0, -0.4 - sw2 * 0.3, -1))
+			cm.pose_arm("L", Vector3(-0.2, -0.55, -0.8), Vector3(0.1, -0.4, -1))
+		"w_cut":
+			var sw3 := sin(Time.get_ticks_msec() * 0.015)
+			cm.pose_arm("R", Vector3(0.2 + sw3 * 0.15, -0.7, -0.6), Vector3(-0.2, -0.6, -0.8 - sw3 * 0.3))
+			cm.pose_arm("L", Vector3(-0.25, -0.7, -0.6), Vector3(0.1, -0.7, -0.7))
+		"w_work", "w_pick", "w_light", "w_cook", "w_pour":
+			var sw4 := sin(Time.get_ticks_msec() * 0.007) * 0.15
+			cm.pose_arm("R", Vector3(0.2, -0.45 + sw4, -0.85), Vector3(-0.1, -0.35, -1))
+			cm.pose_arm("L", Vector3(-0.2, -0.45 - sw4, -0.85), Vector3(0.1, -0.35, -1))
 		"smoke":
 			if fmod(t, 2.3) < 1.0:
 				cm.pose_arm("R", Vector3(0.3, -0.5, -0.7), Vector3(-0.15, 0.9, -0.5))

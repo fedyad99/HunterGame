@@ -9,10 +9,16 @@ const FLOOR_Y := 1.05
 const SEATS := [
 	[Vector3(0.55, 1.12, 2.25), PI],          # 0 водитель
 	[Vector3(-0.55, 1.12, 2.25), PI],         # 1 пассажир
-	[Vector3(0.66, 1.12, -2.75), PI / 2.0],   # 2 диван
-	[Vector3(0.66, 1.12, -3.65), PI / 2.0],   # 3 диван
+	[Vector3(0.66, 1.12, -2.75), PI / 2.0],   # 2 диван у стола
+	[Vector3(0.66, 1.12, -3.65), PI / 2.0],   # 3 диван у стола
+	[Vector3(-0.05, 1.12, -2.3), 0.0],        # 4 табурет у стола (спереди)
+	[Vector3(-0.05, 1.12, -4.1), PI],         # 5 табурет у стола (сзади)
+	[Vector3(0.6, 1.12, -0.5), PI / 2.0],     # 6 кресло
+	[Vector3(0.6, 1.12, -1.55), PI / 2.0],    # 7 кресло
 ]
-const STAND := [Vector3(0.1, 1.1, 1.6), Vector3(-0.2, 1.1, 1.6), Vector3(-0.1, 1.1, -2.75), Vector3(-0.1, 1.1, -3.65)]
+const SEAT_COUNT := 8
+const STAND := [Vector3(0.1, 1.1, 1.6), Vector3(-0.2, 1.1, 1.6), Vector3(-0.1, 1.1, -2.75), Vector3(-0.1, 1.1, -3.65),
+	Vector3(-0.2, 1.1, -1.8), Vector3(-0.2, 1.1, -4.4), Vector3(-0.15, 1.1, -0.5), Vector3(-0.15, 1.1, -1.55)]
 const WHEEL_POS := [Vector3(1.1, 0.55, 2.6), Vector3(-1.1, 0.55, 2.6), Vector3(1.1, 0.55, -4.95), Vector3(-1.1, 0.55, -4.95)]
 const BASE_MASS := 3200.0
 const BASE_COM := Vector3(0, 0.35, -1.2)
@@ -51,7 +57,7 @@ var up_engine := 0
 var up_tank := 0
 var up_armor := 0
 var up_heater := 0
-var seats: Array = [0, 0, 0, 0]
+var seats: Array = [0, 0, 0, 0, 0, 0, 0, 0]
 var throttle_vis := 0.0
 var steer_vis := 0.0
 var gear := 2
@@ -111,6 +117,11 @@ var jack_node: Node3D
 var wheel_parts: Array = []
 var job := {}                              # текущая «работа» (удерживаемое E): только хост
 var _cargo_t := 0.0
+var mud: Array = [0.0, 0.0, 0.0, 0.0]       # насколько колесо увязло в болоте (0..1)
+var stuck := false
+var _hit_cd := {}                           # кого недавно сбили (чтобы не считать дважды)
+var _hit_t := 0.0
+var mud_fx: CPUParticles3D
 var _dent_nodes: Array = []
 
 
@@ -129,7 +140,7 @@ func setup(data: Dictionary) -> void:
 	add_child(MU.make_sync(["sync_xform", "sync_vel", "fuel", "max_fuel", "hp", "up_engine", "up_tank",
 		"up_armor", "up_heater", "seats", "throttle_vis", "steer_vis", "gear", "rpm", "lights_on",
 		"winch_state", "winch_holder", "winch_anchor", "winch_on", "hp_body", "hp_tank", "jack_i", "jack_t", "stove_t",
-		"cargo_mass"], 0.033))
+		"cargo_mass", "mud", "stuck"], 0.033))
 	add_child(MU.make_sync(["wheel_hp", "wheel_state", "store", "winch_item"], 0.1, true, "Sync2"))
 
 
@@ -236,8 +247,8 @@ func _build() -> void:
 	engine_snd.bus = "SFX"
 	add_child(engine_snd)
 	winch_snd = AudioStreamPlayer3D.new()
-	winch_snd.stream = Sfx.get_stream("engine")
-	winch_snd.pitch_scale = 2.4
+	winch_snd.stream = Sfx.get_stream("winch") if Sfx.get_stream("winch") else Sfx.get_stream("engine")
+	winch_snd.pitch_scale = 1.0 if Sfx.get_stream("winch") else 2.4
 	winch_snd.volume_db = -60.0
 	winch_snd.bus = "SFX"
 	add_child(winch_snd)
@@ -498,7 +509,7 @@ func get_seat_xform(i: int) -> Transform3D:
 
 
 func get_stand_point(i: int) -> Vector3:
-	return global_transform * STAND[clampi(i, 0, 3)]
+	return global_transform * STAND[clampi(i, 0, SEAT_COUNT - 1)]
 
 
 func get_exit_point(i: int) -> Vector3:
@@ -718,6 +729,7 @@ func _server_physics(delta: float) -> void:
 	# колёса: сцепление от поверхности, спущенные и снятые, прокол вне дороги
 	var flat_pull := 0.0
 	var drag := 0.0
+	var mud_sum := 0.0
 	for wi in 4:
 		var w := wheels[wi] as VehicleWheel3D
 		var wp: Vector3 = w.global_position
@@ -731,21 +743,46 @@ func _server_physics(delta: float) -> void:
 		var st := int(wheel_state[wi])
 		if st == 0 and absf(speed) > 3.0 and not on_road and randf() < PUNCTURE_RATE * absf(speed):
 			_puncture(wi)
+		# болото: колесо вязнет, сцепление падает; буксуя, закапываешься глубже
+		var sw := 0.0 if on_road else TerrainGen.swamp_at(wp.x, wp.z)
+		var m := float(mud[wi])
+		var spinning := absf(engine_force) > 50.0 and absf(speed) < 1.5
+		if sw > 0.15:
+			var target_mud := sw * (0.55 + 0.45 * clampf(cargo_mass / 1200.0, 0.0, 1.0))
+			if spinning:
+				m = minf(m + delta * 0.12 * sw, 1.0)
+			elif m < target_mud:
+				m = minf(m + delta * 0.03 * sw, target_mud)
+			slip *= lerpf(1.0, 0.3, sw)
+		else:
+			m = maxf(m - delta * (0.35 if absf(speed) > 1.0 else 0.08), 0.0)
+		mud_sum += m
+		var nm: Array = mud
+		nm[wi] = m
+		var base_r := 0.5
 		if st == 1:
 			slip *= 0.6
-			w.wheel_radius = 0.4
+			base_r = 0.4
 			flat_pull += (1.0 if WHEEL_POS[wi].x > 0.0 else -1.0)
 			drag += 1.0
 		elif st == 2:
 			slip *= 0.3
-			w.wheel_radius = 0.2
+			base_r = 0.2
 			drag += 2.0
-		else:
-			w.wheel_radius = 0.5
-		w.wheel_friction_slip = slip
+		w.wheel_radius = base_r - m * 0.24
+		w.wheel_friction_slip = slip * (1.0 - m * 0.6)
 	if flat_pull != 0.0 and jack_i < 0:
 		apply_torque(Vector3.UP * flat_pull * speed * mass * 0.03)
 		apply_central_force(-linear_velocity * mass * 0.05 * drag)
+	# грязь держит: сопротивление движению и почти нет тяги, если увяз глубоко
+	var mud_avg := mud_sum / 4.0
+	stuck = mud_avg > 0.55
+	if mud_avg > 0.05:
+		var hv := linear_velocity * Vector3(1, 0, 1)
+		apply_central_force(-hv * mass * 0.9 * mud_avg)
+		engine_force *= 1.0 - smoothstep(0.35, 0.8, mud_avg) * 0.92
+	mud = mud.duplicate()
+	_tick_hits(delta)
 	# стабилизатор: возвращает кузов к вертикали; тяжёлая крыша делает его слабее
 	var roof_k := clampf(_roof_mass / 700.0, 0.0, 0.55)
 	var up_err := global_basis.y.cross(Vector3.UP)
@@ -783,16 +820,69 @@ func _server_physics(delta: float) -> void:
 	if is_flipped():
 		flip_t += delta
 		if flip_t > 2.5:
-			for i in 4:
+			for i in SEAT_COUNT:
 				if seats[i] != 0:
 					var p: Node = world.get_player(seats[i])
 					if p:
 						p.rpc_id(p.peer_id, "get_hit", Vector3.UP * 4.0, 5.0, 0.0)
-			seats = [0, 0, 0, 0]
+			seats = [0, 0, 0, 0, 0, 0, 0, 0]
 	else:
 		flip_t = 0.0
 	if global_position.y < -30.0:
 		flip_upright()
+
+
+## Наезд на зверя или человека. Урон им — от скорости (v²), дому — от энергии удара (½·m·v²).
+func _tick_hits(delta: float) -> void:
+	_hit_t -= delta
+	if _hit_t > 0.0:
+		return
+	_hit_t = 0.05
+	var v := linear_velocity
+	var spd := v.length()
+	var now := Time.get_ticks_msec() * 0.001
+	for k in _hit_cd.keys():
+		if float(_hit_cd[k]) < now:
+			_hit_cd.erase(k)
+	if spd < 3.0:
+		return
+	var inv := global_transform.affine_inverse()
+	var targets: Array = []
+	for c in world.entities.get_children():
+		if c is Animal and not c.is_queued_for_deletion():
+			targets.append(c)
+	for pid in world.players:
+		var pl: Node = world.players[pid]
+		if pl and not pl.dead and not pl.ride and seats.find(pid) < 0 and not pl.ragdoll:
+			targets.append(pl)
+	for t in targets:
+		var tn := t as Node3D
+		if tn.global_position.distance_to(global_position) > 9.0 or _hit_cd.has(tn.name):
+			continue
+		var l: Vector3 = inv * (tn.global_position + Vector3.UP * 0.5)
+		if absf(l.x) > 1.45 or l.z < REAR_Z - 0.3 or l.z > 4.7 or l.y < -1.0 or l.y > 1.6:
+			continue
+		_hit_cd[tn.name] = now + 1.5
+		var is_animal := t is Animal
+		var m: float = float(ItemsDB.ANIMAL_MASS.get(t.kind, 60.0)) if is_animal else 80.0
+		var e := 0.5 * m * spd * spd
+		var rv_dmg := e / ItemsDB.RV_HIT_ENERGY * float(ARMOR_MULT[up_armor])
+		var front := l.z > 2.5
+		hp_body = maxf(hp_body - rv_dmg * (0.6 if front else 1.0), 0.0)
+		if front:
+			hp = maxf(hp - rv_dmg * 0.7, 0.0)
+		# дом теряет скорость: передаётся импульс
+		apply_central_impulse(-v.normalized() * m * spd * 0.7)
+		var push := v * 0.9 + Vector3.UP * (2.0 + spd * 0.25)
+		if is_animal:
+			t.vehicle_hit(push, ItemsDB.HIT_FLESH_K * spd * spd)
+		else:
+			var dmg := ItemsDB.HIT_PLAYER_K * spd * spd
+			t.rpc_id(t.peer_id, "get_hit", push * 1.2, dmg, 0.3 if dmg > 25.0 else 0.0)
+			world.broadcast(T.t("msg_hit_by_rv", [t.nick]))
+		world.sfx_all("thud", tn.global_position, clampf(spd * 0.5 - 2.0, -4.0, 6.0), 0.7)
+		if rv_dmg > 3.0:
+			world.sfx_all("crash", global_position, clampf(rv_dmg * 0.3 - 6.0, -8.0, 4.0), 1.1)
 
 
 func _wheel_damage(wi: int, dmg: float) -> void:
@@ -984,31 +1074,52 @@ func _tick_job(delta: float) -> void:
 			if tick_snd:
 				world.sfx_all("fuel", global_position, -4.0, 1.0)
 		"repair":
-			var rate := 14.0 * delta
 			var part := str(job.extra.get("part", "engine"))
+			var way := str(job.extra.get("way", part))
+			var rd: Dictionary = ItemsDB.REPAIRS.get(way, ItemsDB.REPAIRS["engine"])
+			var rate := float(rd.rate) * delta
+			var cap := float(rd.cap)
 			var done := false
 			match part:
 				"engine":
-					hp = minf(hp + rate, 100.0)
-					done = hp >= 100.0
+					hp = minf(hp + rate, maxf(cap, hp))
+					done = hp >= cap
 				"body":
-					hp_body = minf(hp_body + rate, 100.0)
-					done = hp_body >= 100.0
+					hp_body = minf(hp_body + rate, maxf(cap, hp_body))
+					done = hp_body >= cap
 				"tank":
-					hp_tank = minf(hp_tank + rate, 100.0)
-					done = hp_tank >= 100.0
+					hp_tank = minf(hp_tank + rate, maxf(cap, hp_tank))
+					done = hp_tank >= cap
 				"wheel":
 					if int(wheel_state[idx]) == 0:
 						var a: Array = wheel_hp.duplicate()
-						a[idx] = minf(float(a[idx]) + rate, 100.0)
+						a[idx] = minf(float(a[idx]) + rate, maxf(cap, float(a[idx])))
 						wheel_hp = a
-						done = a[idx] >= 100.0
+						done = a[idx] >= cap
 					else:
 						done = true
 			if tick_snd:
-				world.sfx_all("repair", global_position, -6.0, 1.0)
+				var snd := {"body": "hammer", "engine": "ratchet", "tank": "ratchet", "tank_tape": "tape", "wheel": "repair"}.get(way, "repair") as String
+				world.sfx_all(snd if Sfx.get_stream(snd) else "repair", global_position, -6.0, randf_range(0.9, 1.1))
 			if done:
 				world.tell(pid, T.t("msg_part_ok"))
+				job = {}
+		"patch":
+			# заплатка на спущенное колесо прямо на месте (без домкрата)
+			if int(wheel_state[idx]) != 1:
+				job = {}
+				return
+			if tick_snd:
+				world.sfx_all("repair", global_position, -6.0, 1.3)
+			if float(job.t) >= 4.0:
+				var a3: Array = wheel_state.duplicate()
+				a3[idx] = 0
+				wheel_state = a3
+				var h3: Array = wheel_hp.duplicate()
+				h3[idx] = 55.0
+				wheel_hp = h3
+				world.sfx_all("pump", global_position, -2.0, 1.0)
+				world.tell(pid, T.t("msg_wheel_patched"))
 				job = {}
 		"jack_up":
 			if jack_i != idx:
@@ -1162,6 +1273,22 @@ func _effects(delta: float) -> void:
 		var wp: Vector3 = WHEEL_POS[jack_i]
 		jack_node.position = Vector3(wp.x * 0.78, 0.05, wp.z)
 		jack_node.scale = Vector3(1, 0.85 + jack_t * 0.5, 1)
+	# грязь из-под колёс в болоте
+	if mud_fx == null:
+		mud_fx = _particles(Color(0.22, 0.17, 0.1), Vector3(0, 0.3, -4.95), 0.06)
+		mud_fx.gravity = Vector3(0, -9.0, 0)
+		mud_fx.direction = Vector3(0, 0.8, -0.6)
+		mud_fx.spread = 35.0
+		mud_fx.initial_velocity_min = 2.0
+		mud_fx.initial_velocity_max = 4.5
+		mud_fx.amount = 40
+		mud_fx.lifetime = 0.9
+		mud_fx.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+		mud_fx.emission_box_extents = Vector3(1.1, 0.1, 0.2)
+	var mm := 0.0
+	for x in mud:
+		mm = maxf(mm, float(x))
+	mud_fx.emitting = mm > 0.15 and throttle_vis > 0.1
 	# вмятины и царапины на кузове по мере повреждения
 	if _dent_nodes.is_empty():
 		_make_dents()

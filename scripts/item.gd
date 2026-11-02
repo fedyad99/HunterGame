@@ -5,7 +5,9 @@ extends RigidBody3D
 var kind := ""
 var q := 1.0                 # качество (для туш) или количество (сигареты)
 var sync_xform := Transform3D()
-var holder := 0
+var holder := 0              # кто несёт (первый из holders), 0 — лежит
+var holders: Array = []      # все, кто взялся (тяжёлое несут вдвоём и больше)
+var age := 0.0               # для скоропортящегося
 var world: Node
 var _last_v := Vector3.ZERO
 var _thud_t := 0.0
@@ -35,7 +37,8 @@ func setup(data: Dictionary) -> void:
 	physics_material_override = pm
 	angular_damp = 0.6
 	continuous_cd = mass < 3.0
-	add_child(MU.make_sync(["sync_xform", "holder"], 0.033))
+	age = float(data.get("age", 0.0))
+	add_child(MU.make_sync(["sync_xform", "holder", "holders"], 0.033))
 
 
 func _ready() -> void:
@@ -51,19 +54,34 @@ func _physics_process(delta: float) -> void:
 		global_transform = global_transform.interpolate_with(sync_xform, clampf(delta * 15.0, 0.0, 1.0))
 		return
 	_thud_t -= delta
+	if ItemsDB.PERISHABLE.has(kind):
+		age += delta
 	if holder != 0:
-		var p: Node = world.get_player(holder)
-		if p == null or p.ragdoll or p.dead:
-			holder = 0
+		var def: Dictionary = ItemsDB.ITEMS[kind]
+		var target := Vector3.ZERO
+		var n := 0
+		var vel := Vector3.ZERO
+		var ok := true
+		for pid in holders:
+			var p: Node = world.get_player(int(pid))
+			if p == null or p.ragdoll or p.dead:
+				ok = false
+				break
+			target += p.get_hold_point(float(def.get("hold", 1.3)))
+			if p.is_multiplayer_authority():
+				vel += p.velocity
+			n += 1
+		if not ok or n == 0:
+			world.drop_item(self)
 		else:
-			var def: Dictionary = ItemsDB.ITEMS[kind]
-			var target: Vector3 = p.get_hold_point(float(def.get("hold", 1.3)))
+			target /= float(n)
+			vel /= float(n)
 			var diff := target - global_position
 			if diff.length() > 4.0:
-				holder = 0   # зацепилось за дерево — выронил
+				world.drop_item(self)   # зацепилось за дерево — выронили
 			else:
-				var k: float = def.get("carry", 8.0)
-				var desired: Vector3 = diff * k + (p.velocity if p.is_multiplayer_authority() else Vector3.ZERO)
+				var k: float = def.get("carry", 8.0) * (1.0 + 0.5 * (n - 1))
+				var desired: Vector3 = diff * k + vel
 				desired = desired.limit_length(14.0)
 				linear_velocity = linear_velocity.lerp(desired, clampf(0.12 * k, 0.1, 0.6))
 				angular_velocity *= 0.92

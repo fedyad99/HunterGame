@@ -272,8 +272,20 @@ static func interior(rv: RV, v: Node3D) -> void:
 	rv.add_child(MU.area_box(Vector3(0.5, 0.6, 0.6), Vector3(1.4, 1.2, -0.6), "rv_fuel", "St_fuel"))
 	rv.add_child(MU.area_box(Vector3(1.8, 0.6, 1.0), Vector3(0, 1.6, 3.85), "rv_engine", "St_engine"))
 	rv.add_child(MU.area_box(Vector3(0.5, 1.0, 3.0), Vector3(1.35, 2.0, -3.9), "rv_body", "St_body"))
+	# табуреты у стола (место 4 и 5)
+	for zi in [-2.3, -4.1]:
+		var leg := _wood(Color(0.55, 0.38, 0.24))
+		for lx in [-0.14, 0.14]:
+			for lz in [-0.14, 0.14]:
+				v.add_child(MU.cyl(0.022, 0.026, 0.42, leg, Vector3(-0.05 + lx, F + 0.21, zi + lz), Vector3(lx * 40.0, 0, -lz * 40.0) * 0.0, 8))
+		v.add_child(MU.cyl(0.21, 0.21, 0.05, leg, Vector3(-0.05, F + 0.44, zi), Vector3.ZERO, 16))
+		v.add_child(MU.cyl(0.2, 0.2, 0.06, A3.tmat("leather", Color(1.6, 0.9, 0.6), 0.5, 0.6), Vector3(-0.05, F + 0.49, zi), Vector3.ZERO, 16))
+	# бардачок у пассажира: крышка с ручкой, внутри — карта
+	v.add_child(MU.box(Vector3(0.42, 0.2, 0.03), A3.tmat("plastic", Color(0.25, 0.25, 0.27), 1.0, 0.6), Vector3(-0.55, 1.83, 3.02), Vector3(-25, 0, 0)))
+	v.add_child(MU.box(Vector3(0.1, 0.025, 0.02), MU.mat(Color(0.6, 0.6, 0.62), 0.3, 0.0, 0.8), Vector3(-0.55, 1.9, 3.0), Vector3(-25, 0, 0)))
+	rv.add_child(MU.area_box(Vector3(0.5, 0.3, 0.3), Vector3(-0.55, 1.85, 2.95), "rv_glovebox", "St_glovebox"))
 	# место
-	for i in 4:
+	for i in RV.SEAT_COUNT:
 		var a := MU.area_box(Vector3(0.6, 0.9, 0.6), RV.SEATS[i][0] + Vector3(0, 0.6, 0), "rv_seat", "St_seat%d" % i)
 		a.set_meta("seat", i)
 		rv.add_child(a)

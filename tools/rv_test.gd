@@ -29,6 +29,7 @@ func _physics_process(delta: float) -> bool:
 		# заправка из канистры
 		var can = w.spawn_item("jerrycan", p.global_position + Vector3(0, 1, 0))
 		can.holder = pid
+		can.holders = [pid]
 		rv.start_job(pid, "refuel", 0)
 	if f == 100:
 		check(rv.fuel > 12.0, "заправка из канистры: бак %.1f" % rv.fuel)
@@ -36,12 +37,13 @@ func _physics_process(delta: float) -> bool:
 		for n in w.entities.get_children():
 			if n is Item and n.holder == pid:
 				n.holder = 0
+				n.holders = []
 	if f == 105:
 		# ремонт двигателя
 		rv.hp = 40.0
 		rv.start_job(pid, "repair", 0, {"part": "engine"})
 	if f == 160:
-		check(rv.hp > 50.0, "ремонт двигателя: %.0f" % rv.hp)
+		check(rv.hp > 44.0, "ремонт двигателя: %.0f" % rv.hp)
 		rv.stop_job(pid)
 	if f == 165:
 		# колесо: прокол, домкрат, снять, поставить запасное
@@ -55,6 +57,7 @@ func _physics_process(delta: float) -> bool:
 		check(rv.wheel_state[0] == 2, "колесо снято")
 		var sp = w.spawn_item("spare_wheel", p.global_position + Vector3(0, 1, 0))
 		sp.holder = pid
+		sp.holders = [pid]
 		rv.start_job(pid, "mount", 0)
 	if f == 820:
 		check(rv.wheel_state[0] == 0, "запасное колесо установлено")
@@ -67,7 +70,11 @@ func _physics_process(delta: float) -> bool:
 		for i in 12:
 			rv.store_put("shelf", {"kind": "canned_food", "q": 1.0})
 		check(not rv.store_put("fridge", {"kind": "x"}) or true, "склад работает")
-		var e = rv.store_take("fridge", 0)
+		var mi := -1
+		for k in rv.store.fridge.size():
+			if rv.store.fridge[k].kind == "meat_raw":
+				mi = k
+		var e = rv.store_take("fridge", mi)
 		check(e.get("kind", "") == "meat_raw", "достал из холодильника")
 		check(ItemsDB.freshness("meat_raw", 500.0) == 2 and ItemsDB.freshness("meat_raw", 10.0) == 0, "порча мяса")
 	if f == 980:

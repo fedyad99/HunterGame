@@ -15,10 +15,12 @@ uniform sampler2D nrm_rock : hint_normal, repeat_enable, filter_linear_mipmap;
 
 varying vec3 wpos;
 varying vec4 mask;
+varying float swampm;
 
 void vertex() {
 	wpos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	mask = COLOR;
+	swampm = UV2.x;
 }
 
 // текстура с гашением повторов: два масштаба вперемешку
@@ -47,8 +49,17 @@ void fragment() {
 	vec3 c = mix(grass, sand, mask.b);
 	c = mix(c, rock, rockm);
 	c = mix(c, road, roadm);
+	// болото: тёмная жижа, лужи блестят
+	float sw = smoothstep(0.15, 0.6, swampm + (n1 - 0.5) * 0.35);
+	float puddle = smoothstep(0.55, 0.7, n2 * 0.6 + n1 * 0.5) * sw;
+	vec3 mud = td * vec3(0.42, 0.38, 0.26) * (0.8 + n1 * 0.3);
+	vec3 moss = tg * vec3(0.55, 0.62, 0.35);
+	vec3 swc = mix(mud, moss, smoothstep(0.45, 0.65, n1) * 0.6);
+	swc = mix(swc, vec3(0.06, 0.07, 0.05), puddle * 0.8);
+	c = mix(c, swc, sw * (1.0 - roadm));
 	ALBEDO = c;
-	ROUGHNESS = mix(0.95, 0.8, rockm);
+	ROUGHNESS = mix(mix(0.95, 0.8, rockm), 0.12, puddle);
+	SPECULAR = mix(0.5, 0.9, puddle);
 	vec3 nm = mix(texture(nrm_grass, wpos.xz * 0.3).rgb, texture(nrm_rock, wpos.xz * 0.2).rgb, rockm);
 	NORMAL_MAP = mix(nm, texture(noise_nrm, wpos.xz * 0.35).rgb, 0.25);
 	NORMAL_MAP_DEPTH = mix(0.8, 1.4, rockm);

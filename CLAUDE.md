@@ -14,12 +14,15 @@
 - `scripts/world.gd` — мир, **все RPC-запросы к хосту** (`req_*`), стрельба, магазин, склад, работы дома.
 - `scripts/player.gd` — игрок: движение, камера, потребности, инвентарь, оружие, взаимодействие (`get_prompt`, `_interact`, удержание E — `_work_poll`).
 - `scripts/char_model.gd` + `look.gd` — модель Quaternius, позы рук по направлению костей.
-- `scripts/animal.gd` — звери (зоны попадания, кровотечение), туши — `Item`.
-- `scripts/item.gd` — физический предмет (RigidBody; группа `items`). Виды и визуал — `items_db.gd`.
+- `scripts/animal.gd` — звери (зоны попадания, кровотечение, наезд `vehicle_hit`), туши — `Item`. Модели — `A3.animal(kind, variant, dead)` по `ItemsDB.ANIMAL_MODELS` (Quaternius/OGA, `assets/models/animals/`).
+- `scripts/wild.gd` (`world.wild`) — дикая природа: зоны обитания (детерминированы, сид 4242, видны на карте), ягодники и грибы, следы (`add_track`/`track_near`/`inspect`), полевые работы удержанием E (`field_cut` — разделка ножом, `fire_light` — спички).
+- `scripts/fire.gd` — костёр (сущность спавнера "fire"): топливо, дождь, тепло для `heat_at`, готовка.
+- `scripts/item.gd` — физический предмет (RigidBody; группа `items`). Виды и визуал — `items_db.gd`. Тяжёлое (`ItemsDB.is_heavy`, от 10 кг, кроме оружия) — только в руках; от 50 кг — несколько игроков (`holders`, `req_grab`), или разделать ножом на месте.
 - `scripts/rv.gd` — дом на колёсах (VehicleBody3D): физика, повреждения, колёса/домкрат, заправка, ремонт, лебёдки, масса груза, склад (`store`), печь. Визуал и салон — `rv_build.gd`.
 - `scripts/a3.gd` — загрузка CC0-моделей (`assets/models/<имя>/`) и текстур (`assets/textures/rv/`).
-- `scripts/hud.gd` — HUD, инвентарь, магазин, склад дома. `settings.gd`, `net.gd`, `sfx.gd` — автозагрузки.
-- `scripts/terrain_gen.gd`, `world_builder.gd` — процедурный рельеф и фактории.
+- `scripts/hud.gd` — HUD, инвентарь, магазин (карточки по категориям, `desc_*`), склад (иконки, только перетаскивание), обвесы (T, `open_attachments`), карта из бардачка (`open_map`, рисуется из TerrainGen), оверлей оптики. `settings.gd`, `net.gd`, `sfx.gd` — автозагрузки.
+- Обвесы: `ItemsDB.ATTACH` (слоты optic/muzzle/under), у игрока `attach[оружие][слот]`, на модели — `att_vis`; оптика меняет режим прицеливания (`scope_view`).
+- `scripts/terrain_gen.gd`, `world_builder.gd` — процедурный рельеф, болота (`swamp_at`, маска в UV2 шейдера), лес из моделей Quaternius (`assets/models/nature/`, MultiMesh по квадратам 100 м) и фактории.
 - `tools/` — тесты и скриншоты, `export_presets.cfg` + `.github/workflows/export.yml` — сборка exe.
 
 ## Сеть
@@ -27,13 +30,16 @@
 
 ## Дом на колёсах (кратко)
 - Части: двигатель (`hp`), кузов, бак (течь при <45), 4 колёса (`wheel_hp`, `wheel_state` 0/1 спущено/2 снято). Удары по месту: лоб → двигатель, зад → бак, бок → колесо.
-- Работы удержанием E (`rv.start_job`): `refuel`, `pump`, `repair` (ремкомплект тратится на клиенте), `jack_up/jack_down/unbolt/mount`.
+- Работы удержанием E (`rv.start_job`): `refuel`, `pump`, `repair` (инструменты из `ItemsDB.REPAIRS`: молоток — кузов, ящик+запчасти — двигатель/бак, изолента — течь, латка — колесо; расходники тратятся на клиенте), `patch`, `jack_up/jack_down/unbolt/mount` (нужен гаечный ключ).
+- Болото: колёса вязнут (`mud[4]`, `stuck`), буксуя — глубже; вытаскивать лебёдкой. Наезды: `_tick_hits` (урон по энергии удара, `ItemsDB.HIT_*`).
+- Лебёдка включается только кнопками на панели в кабине (без горячих клавиш). Сидений 8 (`RV.SEAT_COUNT`), 4 из них — вокруг стола.
 - Лебёдки спереди и сзади (`HOOKS`), трос 50 м (`CABLE_LEN`), цеплять можно за землю/дерево или за большой предмет (туша тащится физически и нагружает дом).
 - Груз (салон, багажник, люди) меняет массу, центр тяжести и мягкость подвески (`_tick_cargo`). Багажник — `rv_rack`, 6 мест, низкие борта.
 - Склад: `store` {fridge, shelf, locker}; в холодильнике еда портится в 8 раз медленнее (`ItemsDB.PERISHABLE`).
 
 ## Запуск, тесты, сборка
-- Godot 4.3 (не .NET) скачать с github.com/godotengine/godot/releases; в контейнере: `godot --headless --import`, затем `--script tools/smoke_test.gd` (также client_test, drive_test, shoot_test).
+- Godot 4.3 (не .NET) скачать с github.com/godotengine/godot/releases; в контейнере: `godot --headless --import`, затем `--script tools/smoke_test.gd` (также rv_test, r4_test — механики 4-го раунда, drive_test, shoot_test; client_test — только вместе с хостом).
+- Звуки: настоящие CC0-записи (см. CREDITS.md), конвертация — `tools/convert_sounds.py`; `Sfx` грузит `sounds/*.wav` по имени.
 - Скриншоты без GPU: `xvfb-run … --rendering-driver opengl3 --rendering-method gl_compatibility --script tools/shot_game.gd -- mode=ext|dash|inside|aim|gun|… out=x.png` (1–2 минуты на кадр, запускать в фоне).
 - exe: `godot --headless --export-release "Windows Desktop" export/HunterGame.exe` (шаблоны экспорта 4.3 нужны), zip кладётся в `/mnt/project-files/builds/`.
 

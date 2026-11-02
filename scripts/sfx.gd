@@ -2,7 +2,7 @@ extends Node
 ## Звуки. Все файлы — в res://sounds (сгенерированы tools/gen_sounds.py,
 ## можно заменить на свои с теми же именами).
 
-const LOOPS := ["engine", "rain", "ambience", "night", "fire"]
+const LOOPS := ["engine", "rain", "ambience", "night", "fire", "winch"]
 var streams := {}
 
 

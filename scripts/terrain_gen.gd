@@ -16,6 +16,8 @@ static var outposts: Array = []
 static var roads: Array = []          # [[Vector2 a, Vector2 b], ...]
 static var grid := PackedFloat32Array()
 static var road_w := PackedFloat32Array()
+static var swamp := PackedFloat32Array()     # 0..1 — насколько топко (болото)
+static var swampn: FastNoiseLite
 
 
 static func init_data() -> void:
@@ -36,6 +38,10 @@ static func init_data() -> void:
 	detail.seed = SEED + 7
 	detail.frequency = 0.05
 	detail.fractal_octaves = 2
+	swampn = FastNoiseLite.new()
+	swampn.seed = SEED + 11
+	swampn.frequency = 0.012
+	swampn.fractal_octaves = 3
 	outposts = [
 		{"id": 0, "key": "outpost_0", "pos": Vector2(-250, -220), "r": 36.0, "shop": true},
 		{"id": 1, "key": "outpost_1", "pos": Vector2(240, -240), "r": 32.0, "shop": true},
@@ -124,6 +130,7 @@ static func build_grid() -> void:
 		return
 	grid.resize(N * N)
 	road_w.resize(N * N)
+	swamp.resize(N * N)
 	for iz in N:
 		for ix in N:
 			var x := -HALF + ix * STEP
@@ -132,6 +139,35 @@ static func build_grid() -> void:
 			grid[i] = compute_height(x, z)
 			var rq := road_query(Vector2(x, z))
 			road_w[i] = 1.0 - smoothstep(2.5, 4.5, rq.x)
+			swamp[i] = _swamp_val(x, z, grid[i], rq.x)
+
+
+## Болота: низины у воды и в ложбинах, подальше от дорог и факторий.
+static func _swamp_val(x: float, z: float, h: float, road_d: float) -> float:
+	if h < WATER + 0.3:
+		return 0.0
+	var n := swampn.get_noise_2d(x, z) * 0.5 + 0.5
+	var v := smoothstep(0.52, 0.66, n) * (1.0 - smoothstep(5.0, 12.0, h))
+	v *= smoothstep(9.0, 18.0, road_d)
+	for o in outposts:
+		var d := Vector2(x, z).distance_to(o.pos)
+		v *= smoothstep(float(o.r) + 15.0, float(o.r) + 45.0, d)
+	return clampf(v, 0.0, 1.0)
+
+
+static func swamp_at(x: float, z: float) -> float:
+	if swamp.size() != N * N:
+		return 0.0
+	var fx := clampf((x + HALF) / STEP, 0.0, N - 1.001)
+	var fz := clampf((z + HALF) / STEP, 0.0, N - 1.001)
+	var ix := int(fx)
+	var iz := int(fz)
+	var tx := fx - ix
+	var tz := fz - iz
+	var i := iz * N + ix
+	var a := lerpf(swamp[i], swamp[i + 1], tx)
+	var b := lerpf(swamp[i + N], swamp[i + N + 1], tx)
+	return lerpf(a, b, tz)
 
 
 static func height_at(x: float, z: float) -> float:
@@ -164,6 +200,8 @@ static func build_mesh() -> ArrayMesh:
 	var norms := PackedVector3Array()
 	var cols := PackedColorArray()
 	var uvs := PackedVector2Array()
+	var uv2 := PackedVector2Array()
+	uv2.resize(N * N)
 	verts.resize(N * N)
 	norms.resize(N * N)
 	cols.resize(N * N)
@@ -180,6 +218,7 @@ static func build_mesh() -> ArrayMesh:
 			var n := Vector3(hl - hr, 2.0 * STEP, hu - hd).normalized()
 			norms[i] = n
 			uvs[i] = Vector2(ix, iz) * 0.5
+			uv2[i] = Vector2(swamp[i], 0.0)
 			# Канал R — «трава/земля», G — скала, B — песок, A — дорога (маска для шейдера).
 			var sand := 1.0 - smoothstep(WATER + 0.6, WATER + 2.0, h)
 			var rock := 1.0 - smoothstep(0.72, 0.86, n.y)
@@ -204,6 +243,7 @@ static func build_mesh() -> ArrayMesh:
 	arr[Mesh.ARRAY_NORMAL] = norms
 	arr[Mesh.ARRAY_COLOR] = cols
 	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_TEX_UV2] = uv2
 	arr[Mesh.ARRAY_INDEX] = idx
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)

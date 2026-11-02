@@ -46,10 +46,14 @@ var _blood: Array = []
 var _blood_mesh: Mesh
 var _blood_mat: Material
 var spectator_cam: Camera3D
+var wild: Wild
 
 
 func _ready() -> void:
-	TerrainGen.init_data()
+	TerrainGen.build_grid()
+	wild = Wild.new()
+	wild.name = "Wild"
+	add_child(wild)
 	WorldBuilder.build(self)
 	entities = Node3D.new()
 	entities.name = "Entities"
@@ -110,6 +114,12 @@ func _spawn_entity(data: Variant) -> Node:
 			var it := Item.new()
 			it.setup(d)
 			return it
+		"fire":
+			var f := Fire.new()
+			f.setup(d)
+			heat_sources.append(f)
+			f.tree_exiting.connect(func(): heat_sources.erase(f))
+			return f
 	return Node.new()
 
 
@@ -128,10 +138,10 @@ func _next_name(prefix: String) -> String:
 	return "%s%d" % [prefix, _counter]
 
 
-func spawn_item(kind: String, pos: Vector3, vel := Vector3.ZERO, q := 1.0) -> Item:
+func spawn_item(kind: String, pos: Vector3, vel := Vector3.ZERO, q := 1.0, age := 0.0) -> Item:
 	if not multiplayer.is_server():
 		return null
-	var it: Item = spawner.spawn({"t": "item", "kind": kind, "pos": pos, "q": q, "name": _next_name("I")})
+	var it: Item = spawner.spawn({"t": "item", "kind": kind, "pos": pos, "q": q, "age": age, "name": _next_name("I")})
 	it.linear_velocity = vel
 	it.angular_velocity = Vector3(randf_range(-3, 3), randf_range(-3, 3), randf_range(-3, 3)) * minf(vel.length(), 1.0)
 	return it
@@ -152,7 +162,14 @@ func _server_start() -> void:
 	spawn_item("jerrycan", c + Vector3(9.0, 0.5, -7.5))
 	spawn_item("jack", c + Vector3(8.0, 0.5, -8.2))
 	spawn_item("spare_wheel", c + Vector3(10.5, 0.5, -8.0))
-	spawn_item("repair_kit", c + Vector3(8.5, 0.5, -6.6))
+	spawn_item("toolbox", c + Vector3(8.5, 0.5, -6.6))
+	var tools := c + Vector3(7.0, 0.8, -6.0)
+	for k in ["wrench", "hammer", "spare_parts", "duct_tape", "tire_patch", "knife", "knife", "matches"]:
+		spawn_item(k, tools + Vector3(randf_range(-0.8, 0.8), randf_range(0, 0.4), randf_range(-0.4, 0.4)), Vector3.ZERO, 20.0 if k == "matches" else 1.0)
+	# в холодильнике дома с самого начала — пиво и водка
+	if rv:
+		for k in ["beer", "beer", "beer", "vodka", "canned_food", "water_bottle"]:
+			rv.store_put("fridge", {"kind": k, "q": 1.0, "age": 0.0})
 	_register(1, Net.nick, Net.look.to_string_code())
 	hud.add_msg(T.t("msg_hosting", [Net.port]))
 
@@ -165,6 +182,7 @@ func _register(id: int, nick: String, look: String = "") -> void:
 	_colors_used += 1
 	if id != 1:
 		rpc_id(id, "recv_state", money, game_time, day, raining)
+		wild.send_bushes(id)
 
 
 func get_respawn_point() -> Vector3:
@@ -196,6 +214,27 @@ func _random_land(min_player_dist: float) -> Vector3:
 	return Vector3.INF
 
 
+## Точка в зоне обитания зверя (см. Wild.habitats), подальше от игроков.
+func _habitat_land(kind: String, min_player_dist: float) -> Vector3:
+	for i in 40:
+		var p2 := wild.habitat_point(kind)
+		var x := p2.x
+		var z := p2.y
+		if not TerrainGen.is_land(x, z, 1.0) or TerrainGen.normal_at(x, z).y < 0.8:
+			continue
+		var p := Vector3(x, TerrainGen.height_at(x, z), z)
+		var ok := true
+		for o in TerrainGen.outposts:
+			if Vector2(x, z).distance_to(o.pos) < 60.0:
+				ok = false
+		for pl in players.values():
+			if pl.global_position.distance_to(p) < min_player_dist:
+				ok = false
+		if ok:
+			return p
+	return _random_land(min_player_dist)
+
+
 func _populate(initial: bool) -> void:
 	var counts := {}
 	for k in ItemsDB.ANIMALS:
@@ -207,7 +246,7 @@ func _populate(initial: bool) -> void:
 		var missing: int = int(ItemsDB.ANIMALS[k].count) - int(counts[k])
 		var n := missing if initial else mini(missing, 1)
 		for i in n:
-			var p := _random_land(90.0)
+			var p := _habitat_land(k, 90.0)
 			if p != Vector3.INF:
 				spawner.spawn({"t": "animal", "kind": k, "pos": p, "name": _next_name("A")})
 
@@ -226,13 +265,13 @@ func _on_peer_disconnected(id: int) -> void:
 		p.queue_free()
 	if rv:
 		var s: Array = rv.seats.duplicate()
-		for i in 4:
+		for i in RV.SEAT_COUNT:
 			if s[i] == id:
 				s[i] = 0
 		rv.seats = s
 	var held := get_held_item(id)
 	if held:
-		held.holder = 0
+		drop_item(held)
 
 
 func _on_connected() -> void:
@@ -299,9 +338,26 @@ func get_player(id: int) -> Node:
 
 func get_held_item(pid: int) -> Node:
 	for c in entities.get_children():
-		if c is Item and c.holder == pid and not c.is_queued_for_deletion():
+		if c is Item and c.holder != 0 and (c.holder == pid or c.holders.has(pid)) and not c.is_queued_for_deletion():
 			return c
 	return null
+
+
+## Предмет, за который игрок взялся, но поднять пока не может (ждёт помощи).
+func get_waiting_item(pid: int) -> Node:
+	for c in entities.get_children():
+		if c is Item and c.holder == 0 and c.holders.has(pid) and not c.is_queued_for_deletion():
+			return c
+	return null
+
+
+## Хост: все отпускают предмет.
+func drop_item(it: Item) -> void:
+	var hs: Array = it.holders.duplicate()
+	it.holder = 0
+	it.holders = []
+	for pid in hs:
+		_set_holding(int(pid), false)
 
 
 func nearest_player(pos: Vector3) -> Array:
@@ -335,8 +391,29 @@ func req_grab(item_name: String) -> void:
 	var it := _item_near(item_name, p, 5.0)
 	if it == null or it.holder != 0 or get_held_item(sid) != null:
 		return
-	it.holder = sid
-	_set_holding(sid, true)
+	# отпустить то, за что брался раньше
+	var w := get_waiting_item(sid) as Item
+	if w and w != it:
+		var a: Array = w.holders.duplicate()
+		a.erase(sid)
+		w.holders = a
+	var hs: Array = it.holders.duplicate()
+	if hs.has(sid):
+		# второе нажатие — отпустить
+		hs.erase(sid)
+		it.holders = hs
+		return
+	hs.append(sid)
+	it.holders = hs
+	var need := ItemsDB.lifters_needed(it.kind)
+	if hs.size() >= need:
+		it.holder = int(hs[0])
+		for pid in hs:
+			_set_holding(int(pid), true)
+		if need > 1:
+			sfx_all("thud", it.global_position, -4.0, 0.7)
+	else:
+		tell(sid, T.t("msg_need_helpers", [need - hs.size()]))
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -348,10 +425,13 @@ func req_pickup(item_name: String) -> void:
 	var it := _item_near(item_name, p, 5.0)
 	if it == null or (it.holder != 0 and it.holder != sid):
 		return
+	if ItemsDB.is_heavy(it.kind):
+		return
 	var kind := it.kind
 	var q := it.q
+	var age := it.age
 	it.queue_free()
-	p.rpc_id(sid, "inv_add", kind, q)
+	p.rpc_id(sid, "inv_add", kind, q, age)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -359,9 +439,14 @@ func req_drop() -> void:
 	if not multiplayer.is_server():
 		return
 	var sid := _sender()
-	var it := get_held_item(sid)
+	var it := get_held_item(sid) as Item
 	if it:
-		it.holder = 0
+		drop_item(it)
+	var w := get_waiting_item(sid) as Item
+	if w:
+		var a: Array = w.holders.duplicate()
+		a.erase(sid)
+		w.holders = a
 	_set_holding(sid, false)
 
 
@@ -371,8 +456,11 @@ func req_throw(dir: Vector3) -> void:
 		return
 	var sid := _sender()
 	var it: Item = get_held_item(sid)
+	if it and it.holders.size() > 1:
+		drop_item(it)
+		return
 	if it:
-		it.holder = 0
+		drop_item(it)
 		it.linear_velocity = dir.normalized() * clampf(70.0 / it.mass, 3.0, 13.0)
 		it.angular_velocity = Vector3(randf_range(-4, 4), randf_range(-4, 4), randf_range(-4, 4))
 	_set_holding(sid, false)
@@ -385,9 +473,9 @@ func _set_holding(pid: int, v: bool) -> void:
 
 
 @rpc("any_peer", "call_local", "reliable")
-func req_spawn_item(kind: String, q: float, pos: Vector3, vel: Vector3) -> void:
+func req_spawn_item(kind: String, q: float, pos: Vector3, vel: Vector3, age := 0.0) -> void:
 	if multiplayer.is_server() and ItemsDB.ITEMS.has(kind):
-		spawn_item(kind, pos, vel, q)
+		spawn_item(kind, pos, vel, q, age)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -406,7 +494,7 @@ func req_death_penalty() -> void:
 	var sid := _sender()
 	var held := get_held_item(sid)
 	if held:
-		held.holder = 0
+		drop_item(held)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -452,21 +540,30 @@ func req_station(path: NodePath, inv_kind: String) -> void:
 				_butcher(held, st)
 			else:
 				tell(sid, T.t("prompt_need_carcass"))
-		"rv_stove", "campfire":
-			if held and held.kind == "firewood":
-				held.queue_free()
+		"rv_stove", "campfire", "fire":
+			var fire := st.get_parent() as Fire
+			if (held and held.kind == "firewood") or inv_kind == "firewood":
+				if held and held.kind == "firewood":
+					held.queue_free()
+					_set_holding(sid, false)
 				sfx_all("fire_whoosh", st.global_position, 0.0, 1.0)
 				_boost_fire(st)
 				if kind == "rv_stove" and rv:
 					rv.stove_t = minf(rv.stove_t + 240.0, 720.0)
-			elif inv_kind == "meat_raw":
-				_cooking.append({"node": st, "t": 7.0, "burn": 25.0})
+				if fire:
+					fire.add_wood()
+			elif ItemsDB.COOK.has(inv_kind):
+				var hot := true
+				if kind == "rv_stove" and rv:
+					hot = rv.stove_t > 0.0
+				if fire:
+					hot = fire.lit
+				if not hot:
+					tell(sid, T.t("msg_fire_out"))
+					p.rpc_id(sid, "inv_add", inv_kind, 1.0, 0.0)
+					return
+				_cooking.append({"node": st, "t": 7.0 if inv_kind == "meat_raw" else 5.0, "raw": inv_kind})
 				sfx_all("sizzle", st.global_position, 0.0, 1.0)
-		"rv_engine":
-			if inv_kind == "repair_kit" and rv:
-				rv.hp = minf(rv.hp + 50.0, 100.0)
-				sfx_all("repair", st.global_position, 0.0, 1.0)
-				broadcast(T.t("msg_repaired", [p.nick, int(rv.hp)]))
 		"rv_fuel":
 			if held and held.kind == "jerrycan" and rv:
 				held.queue_free()
@@ -574,7 +671,7 @@ func _near_rv(p: Node, dist := 9.0) -> bool:
 
 @rpc("any_peer", "call_local", "reliable")
 func req_sit(i: int) -> void:
-	if not multiplayer.is_server() or rv == null or i < 0 or i > 3:
+	if not multiplayer.is_server() or rv == null or i < 0 or i >= RV.SEAT_COUNT:
 		return
 	var sid := _sender()
 	var p := get_player(sid)
@@ -596,8 +693,7 @@ func req_sit(i: int) -> void:
 	rv.seats = s
 	var held := get_held_item(sid)
 	if held:
-		held.holder = 0
-		_set_holding(sid, false)
+		drop_item(held)
 	sfx_all("door", rv.global_position, -6.0, 1.2)
 
 
@@ -692,7 +788,7 @@ func req_horn() -> void:
 
 # ======================================================================= СТРЕЛЬБА (баллистика у хоста)
 @rpc("any_peer", "call_local", "reliable")
-func req_shoot(origin: Vector3, dir: Vector3, ammo_kind: String, snd: String) -> void:
+func req_shoot(origin: Vector3, dir: Vector3, ammo_kind: String, snd: String, loud := 1.0) -> void:
 	if not multiplayer.is_server() or not ItemsDB.AMMO.has(ammo_kind):
 		return
 	var sid := _sender()
@@ -707,11 +803,13 @@ func req_shoot(origin: Vector3, dir: Vector3, ammo_kind: String, snd: String) ->
 		d = d.rotated(Vector3.UP, randf_range(-spread, spread))
 		_bullets.append({"pos": origin, "vel": d * float(a.speed), "v0": float(a.speed), "ammo": ammo_kind,
 			"pen": float(a.pen), "t": 0.0, "shooter": sid, "hit": []})
-	sfx_all(snd, origin, 4.0, randf_range(0.95, 1.05))
+	loud = clampf(loud, 0.2, 1.0)
+	# с глушителем — тише и с другим тембром
+	sfx_all(snd, origin, 4.0 if loud > 0.9 else -10.0, randf_range(0.95, 1.05) * (1.0 if loud > 0.9 else 1.35))
 	rpc("fx_muzzle", origin, dir)
 	# звери в округе пугаются
 	for c in entities.get_children():
-		if c is Animal and c.global_position.distance_to(origin) < 120.0:
+		if c is Animal and c.global_position.distance_to(origin) < 120.0 * loud:
 			c.alarm(origin, sid)
 
 
@@ -851,6 +949,7 @@ func _server_tick(delta: float) -> void:
 	if _pop_t <= 0.0:
 		_pop_t = 8.0
 		_populate(false)
+	wild.server_tick(delta)
 	# готовка
 	for c in _cooking.duplicate():
 		c.t -= delta
@@ -858,7 +957,10 @@ func _server_tick(delta: float) -> void:
 			_cooking.erase(c)
 			if is_instance_valid(c.node):
 				var pos: Vector3 = c.node.global_position + Vector3.UP * 0.6
-				spawn_item("meat_burnt" if randf() < 0.1 else "meat_cooked", pos, Vector3(randf_range(-1, 1), 3.0, randf_range(-1, 1)))
+				var res: String = ItemsDB.COOK.get(str(c.get("raw", "meat_raw")), "meat_cooked")
+				if res == "meat_cooked" and randf() < 0.1:
+					res = "meat_burnt"
+				spawn_item(res, pos, Vector3(randf_range(-1, 1), 3.0, randf_range(-1, 1)))
 				sfx_all("pop", pos, 0.0, 1.0)
 	# скупка
 	_sell_t -= delta
@@ -906,6 +1008,8 @@ func ambient_temp() -> float:
 func heat_at(pos: Vector3) -> float:
 	var h := 0.0
 	for f in heat_sources:
+		if f is Fire and not f.lit:
+			continue
 		var d: float = (f as Node3D).global_position.distance_to(pos)
 		if d < 5.0:
 			h = maxf(h, 1.0 - d / 5.0 * 0.7)
@@ -1088,6 +1192,20 @@ func _rebuild_grass(center: Vector3) -> void:
 		mm.set_instance_transform(i, xfs[i])
 
 
+func add_track(kind: String, pos: Vector3, yaw: float, who: String, blood: bool, dung := false) -> void:
+	wild.add_track(kind, pos, yaw, who, blood, dung)
+
+
+func add_blood_all(pos: Vector3) -> void:
+	rpc("fx_blood", pos)
+
+
+@rpc("authority", "call_local", "unreliable")
+func fx_blood(pos: Vector3) -> void:
+	for i in 4:
+		add_blood(pos + Vector3(randf_range(-0.5, 0.5), 0, randf_range(-0.5, 0.5)))
+
+
 func add_blood(pos: Vector3) -> void:
 	var mi := MeshInstance3D.new()
 	mi.mesh = _blood_mesh
@@ -1161,14 +1279,21 @@ func _burst(pos: Vector3, c: Color, n: int, size: float, emit := 0.0) -> void:
 # --- длительные работы с домом (удержание E): заправка, ремонт, домкрат, колёса
 @rpc("any_peer", "call_local", "reliable")
 func req_work(kind: String, idx: int, on: bool, extra: Dictionary = {}) -> void:
-	if not multiplayer.is_server() or rv == null:
+	if not multiplayer.is_server():
 		return
 	var sid := _sender()
 	if not on:
-		rv.stop_job(sid)
+		if rv:
+			rv.stop_job(sid)
+		wild.stop_job(sid)
 		return
 	var p := get_player(sid)
-	if p == null or not kind in ["refuel", "pump", "repair", "unbolt", "mount", "jack_up", "jack_down"]:
+	if p == null:
+		return
+	if kind in ["field_cut", "fire_light"]:
+		wild.start_job(sid, kind, str(extra.get("target", "")))
+		return
+	if rv == null or not kind in ["refuel", "pump", "repair", "unbolt", "mount", "jack_up", "jack_down", "patch"]:
 		return
 	if kind != "pump" and not _near_rv(p, 9.0):
 		return
@@ -1238,6 +1363,31 @@ func req_store(key: String, op: String, entry: Dictionary, idx: int) -> void:
 
 
 # --- багажник на крыше
+## Сложить костёр из полена в руках.
+@rpc("any_peer", "call_local", "reliable")
+func req_build_fire(pos: Vector3, from_inv := false) -> void:
+	if not multiplayer.is_server():
+		return
+	var sid := _sender()
+	var p := get_player(sid)
+	var held := get_held_item(sid) as Item
+	if p == null or p.global_position.distance_to(pos) > 4.0:
+		return
+	if not from_inv and (held == null or held.kind != "firewood"):
+		return
+	for c in entities.get_children():
+		if c is Fire and c.global_position.distance_to(pos) < 2.5:
+			if from_inv:
+				p.rpc_id(sid, "inv_add", "firewood", 1.0, 0.0)
+			return
+	if not from_inv:
+		held.queue_free()
+		_set_holding(sid, false)
+	pos.y = TerrainGen.height_at(pos.x, pos.z)
+	spawner.spawn({"t": "fire", "pos": pos, "name": _next_name("F")})
+	sfx_all("thud", pos, -4.0, 1.2)
+
+
 @rpc("any_peer", "call_local", "reliable")
 func req_rack() -> void:
 	if not multiplayer.is_server() or rv == null:
@@ -1245,14 +1395,13 @@ func req_rack() -> void:
 	var sid := _sender()
 	var p := get_player(sid)
 	var held := get_held_item(sid) as Item
-	if p == null or held == null or not ItemsDB.ITEMS[held.kind].get("big", false) or not _near_rv(p, 9.0):
+	if p == null or held == null or not ItemsDB.is_heavy(held.kind) or not _near_rv(p, 9.0):
 		return
 	var pos := rv.rack_free_slot()
 	if pos == Vector3.INF:
 		tell(sid, T.t("msg_rack_full"))
 		return
-	held.holder = 0
-	_set_holding(sid, false)
+	drop_item(held)
 	held.global_position = pos
 	held.linear_velocity = rv.linear_velocity
 	held.angular_velocity = Vector3.ZERO

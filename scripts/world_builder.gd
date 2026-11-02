@@ -190,13 +190,91 @@ static func _near_outpost(p: Vector2, extra: float) -> bool:
 	return false
 
 
+## Модель природы (Quaternius, CC0) как одна сетка для MultiMesh: [Mesh, Transform3D узла].
+static var _nature_cache := {}
+
+
+static func nature_mesh(name: String) -> Array:
+	if _nature_cache.has(name):
+		return _nature_cache[name]
+	var ps: PackedScene = load("res://assets/models/nature/%s.gltf" % name)
+	var res := [null, Transform3D()]
+	if ps:
+		var n: Node3D = ps.instantiate()
+		var mis := n.find_children("*", "MeshInstance3D", true, false)
+		if mis.size() == 1:
+			var mi := mis[0] as MeshInstance3D
+			var xf := Transform3D()
+			var p: Node = mi
+			while p != null and p != n:
+				xf = (p as Node3D).transform * xf
+				p = p.get_parent()
+			res = [mi.mesh, xf]
+		elif mis.size() > 1:
+			# несколько частей — склеиваем в одну сетку (по поверхности на материал)
+			var am := ArrayMesh.new()
+			for c in mis:
+				var mi2 := c as MeshInstance3D
+				var xf2 := Transform3D()
+				var p2: Node = mi2
+				while p2 != null and p2 != n:
+					xf2 = (p2 as Node3D).transform * xf2
+					p2 = p2.get_parent()
+				for si in mi2.mesh.get_surface_count():
+					var st := SurfaceTool.new()
+					st.append_from(mi2.mesh, si, xf2)
+					st.commit(am)
+					am.surface_set_material(am.get_surface_count() - 1, mi2.mesh.surface_get_material(si))
+			res = [am, Transform3D()]
+		n.free()
+	_nature_cache[name] = res
+	return res
+
+
+const CHUNK := 100.0
+
+
+## Раскладывает экземпляры по квадратам CHUNK×CHUNK: дальние квадраты не рисуются.
+static func _chunked(w: Node3D, nm: String, model: String, xfs: Array, vis_end: float, shadows := true) -> void:
+	var info := nature_mesh(model)
+	if info[0] == null:
+		return
+	var groups := {}
+	for xf in xfs:
+		var t: Transform3D = xf
+		var key := Vector2i(floori(t.origin.x / CHUNK), floori(t.origin.z / CHUNK))
+		if not groups.has(key):
+			groups[key] = []
+		groups[key].append(t * (info[1] as Transform3D))
+	for key in groups:
+		var arr: Array = groups[key]
+		var origin := Vector3((key.x + 0.5) * CHUNK, 0, (key.y + 0.5) * CHUNK)
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = info[0]
+		mm.instance_count = arr.size()
+		for i in arr.size():
+			var t2: Transform3D = arr[i]
+			t2.origin -= origin
+			mm.set_instance_transform(i, t2)
+		var mmi := MultiMeshInstance3D.new()
+		mmi.name = "%s_%d_%d" % [nm, key.x, key.y]
+		mmi.multimesh = mm
+		mmi.position = origin
+		mmi.visibility_range_end = vis_end
+		mmi.visibility_range_end_margin = 20.0
+		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		if not shadows:
+			mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		w.add_child(mmi)
+
+
 static func _forest(w: Node3D) -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 2024
-	var pines: Array = []
-	var birches: Array = []
-	var bushes: Array = []
-	var rocks: Array = []
+	var pine_models := ["Pine_1", "Pine_2", "Pine_3", "Pine_4", "Pine_5"]
+	var leaf_models := ["CommonTree_1", "CommonTree_2", "CommonTree_3", "BirchTree_1", "BirchTree_2", "BirchTree_3"]
+	var by_model := {}
 	var trees_body := StaticBody3D.new()
 	trees_body.name = "Trees"
 	trees_body.collision_layer = MU.L_WORLD
@@ -207,7 +285,8 @@ static func _forest(w: Node3D) -> void:
 	trunk_shape.radius = 0.3
 	trunk_shape.height = 6.0
 	var tries := 0
-	while pines.size() + birches.size() < 2200 and tries < 30000:
+	var placed := 0
+	while placed < 2200 and tries < 30000:
 		tries += 1
 		# кластеры леса — по шуму
 		var x := rng.randf_range(-370, 370)
@@ -221,61 +300,90 @@ static func _forest(w: Node3D) -> void:
 		var p2 := Vector2(x, z)
 		if TerrainGen.road_query(p2).x < 7.0 or _near_outpost(p2, 6.0):
 			continue
-		var s := rng.randf_range(0.75, 1.35)
-		var xf := Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3(s, s * rng.randf_range(0.9, 1.15), s)), Vector3(x, h - 0.2, z))
-		if h > 40.0 or rng.randf() < 0.7:
-			pines.append(xf)
+		var sw := TerrainGen.swamp_at(x, z)
+		var s := rng.randf_range(0.75, 1.3)
+		var model := ""
+		if sw > 0.4:
+			if rng.randf() < 0.7:
+				continue
+			model = "DeadTree_%d" % (1 + rng.randi() % 3)   # в болоте — сухостой
+		elif h > 40.0 or rng.randf() < 0.65:
+			model = pine_models[rng.randi() % pine_models.size()]
 		else:
-			birches.append(xf)
+			model = leaf_models[rng.randi() % leaf_models.size()]
+		var xf := Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3(s, s * rng.randf_range(0.9, 1.15), s)), Vector3(x, h - 0.15, z))
+		if not by_model.has(model):
+			by_model[model] = []
+		by_model[model].append(xf)
+		placed += 1
 		var cs := CollisionShape3D.new()
 		cs.shape = trunk_shape
 		cs.position = Vector3(x, h + 3.0, z)
 		trees_body.add_child(cs)
-	for i in 1800:
+	for m in by_model:
+		_chunked(w, "T_" + m, m, by_model[m], 420.0)
+	# подлесок: кусты, папоротник, цветы, трава
+	var under := {}
+	for i in 2600:
 		var x := rng.randf_range(-370, 370)
 		var z := rng.randf_range(-370, 370)
 		var h := TerrainGen.height_at(x, z)
 		if h < TerrainGen.WATER + 0.5 or TerrainGen.road_query(Vector2(x, z)).x < 5.0 or _near_outpost(Vector2(x, z), 2.0):
 			continue
-		var s := rng.randf_range(0.6, 1.4)
-		bushes.append(Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3.ONE * s), Vector3(x, h - 0.1, z)))
+		var dens := TerrainGen.noise.get_noise_2d(x * 3.1 + 500.0, z * 3.1)
+		var r := rng.randf()
+		var model := ""
+		var s := rng.randf_range(0.5, 1.0)
+		if TerrainGen.swamp_at(x, z) > 0.3:
+			model = "Grass_Wispy_Tall" if r < 0.6 else "Plant_7"
+			s = rng.randf_range(0.6, 1.2)
+		elif dens > 0.0:
+			model = "Fern_1" if r < 0.45 else ("Bush_Large" if r < 0.7 else ("Bush_Small" if r < 0.85 else "Plant_1"))
+			if model == "Fern_1":
+				s = rng.randf_range(0.5, 0.9)
+			elif model.begins_with("Bush"):
+				s = rng.randf_range(0.35, 0.6)
+		else:
+			model = "Flower_3_Group" if r < 0.25 else ("Flower_4_Group" if r < 0.45 else ("Grass_Common_Tall" if r < 0.8 else "Clover_1"))
+			s = rng.randf_range(0.35, 0.7)
+		if not under.has(model):
+			under[model] = []
+		under[model].append(Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3.ONE * s), Vector3(x, h - 0.05, z)))
+	for m in under:
+		_chunked(w, "U_" + m, m, under[m], 140.0, false)
+	# камни
 	var rocks_body := StaticBody3D.new()
 	rocks_body.name = "Rocks"
 	rocks_body.collision_layer = MU.L_WORLD
 	w.add_child(rocks_body)
+	var rocks := {}
 	for i in 260:
 		var x := rng.randf_range(-370, 370)
 		var z := rng.randf_range(-370, 370)
 		var h := TerrainGen.height_at(x, z)
 		if TerrainGen.road_query(Vector2(x, z)).x < 6.0 or _near_outpost(Vector2(x, z), 4.0):
 			continue
-		var s := rng.randf_range(0.4, 2.2)
-		var sc := Vector3(s * rng.randf_range(0.8, 1.5), s * rng.randf_range(0.5, 0.9), s)
-		rocks.append(Transform3D(Basis.from_euler(Vector3(rng.randf() * 0.3, rng.randf() * TAU, rng.randf() * 0.3)).scaled(sc), Vector3(x, h, z)))
-		if s > 0.9:
+		var s := rng.randf_range(0.2, 0.8)
+		var model := "Rock_Medium_%d" % (1 + rng.randi() % 3)
+		if s < 0.3:
+			model = "Pebble_Round_%d" % (1 if rng.randf() < 0.5 else 3)
+			s *= 6.0
+		if not rocks.has(model):
+			rocks[model] = []
+		rocks[model].append(Transform3D(Basis.from_euler(Vector3(0, rng.randf() * TAU, 0)).scaled(Vector3.ONE * s), Vector3(x, h - 0.2 * s, z)))
+		if model.begins_with("Rock") and s > 0.45:
 			var cs := CollisionShape3D.new()
 			var sp := SphereShape3D.new()
-			sp.radius = s * 0.7
+			sp.radius = s * 1.3
 			cs.shape = sp
-			cs.position = Vector3(x, h + s * 0.1, z)
+			cs.position = Vector3(x, h + s * 0.2, z)
 			rocks_body.add_child(cs)
-	_multimesh(w, "Pines", _pine_mesh(), pines)
-	_multimesh(w, "Birches", _birch_mesh(), birches)
-	_multimesh(w, "Bushes", _bush_mesh(), bushes)
-	_multimesh(w, "RockMeshes", _rock_mesh(), rocks)
-
-
-static func _multimesh(w: Node3D, nm: String, mesh: Mesh, xfs: Array) -> void:
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = mesh
-	mm.instance_count = xfs.size()
-	for i in xfs.size():
-		mm.set_instance_transform(i, xfs[i])
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = nm
-	mmi.multimesh = mm
-	w.add_child(mmi)
+	for m in rocks:
+		_chunked(w, "R_" + m, m, rocks[m], 320.0)
+	# ягодники
+	var bush := nature_mesh("Bush_Common")
+	if bush[0] and w.get("wild"):
+		w.wild.build_bush_visuals(bush[0])
 
 
 # ---------------------------------------------------------------- Фактории

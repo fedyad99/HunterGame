@@ -31,6 +31,15 @@ var last_overkill := 0.0
 var world: Node
 var vis: Node3D
 var legs: Array = []
+var anim_player: AnimationPlayer
+var anim_names: Dictionary = {}
+var skel: Skeleton3D
+var leg_bones: Array = []
+var head_bone := -1
+var _cur_anim := ""
+var _track_t := 0.0
+var _track_from := Vector3.ZERO
+var _drop_t := 60.0
 var anim_phase := 0.0
 var last_pos := Vector3.ZERO
 var _blood_t := 0.0
@@ -93,66 +102,26 @@ func _build_hitboxes(s: Vector3) -> void:
 	_hitbox("HB_legs", "leg", lg, Vector3(0, h * 0.2, 0))
 
 
-func _build_visual(s: Vector3) -> void:
+func _build_visual(_s: Vector3) -> void:
 	vis = Node3D.new()
 	vis.name = "Vis"
 	add_child(vis)
-	var w := s.x
-	var h := s.y
-	var l := s.z
-	match kind:
-		"deer":
-			var fur := Color(0.52, 0.35, 0.2)
-			var belly := Color(0.85, 0.78, 0.65)
-			vis.add_child(MU.capsule(w * 0.48, l * 0.95, fur, Vector3(0, h * 0.62, 0), Vector3(90, 0, 0)))
-			vis.add_child(MU.sphere(w * 0.32, belly, Vector3(0, h * 0.62, l * 0.43)))       # белое «зеркало»
-			vis.add_child(MU.capsule(w * 0.17, h * 0.42, fur, Vector3(0, h * 0.82, -l * 0.42), Vector3(-35, 0, 0)))
-			vis.add_child(MU.capsule(w * 0.2, w * 0.75, fur.darkened(0.05), Vector3(0, h * 0.95, -l * 0.6), Vector3(70, 0, 0)))
-			vis.add_child(MU.sphere(w * 0.07, Color(0.05, 0.05, 0.05), Vector3(0, h * 0.9, -l * 0.78)))
-			for e in [-1, 1]:
-				vis.add_child(MU.box(Vector3(0.03, 0.14, 0.07), fur, Vector3(e * w * 0.2, h * 1.07, -l * 0.55), Vector3(0, 0, e * 35)))
-				# рога
-				vis.add_child(MU.cyl(0.012, 0.022, 0.42, Color(0.8, 0.75, 0.6), Vector3(e * 0.08, h * 1.2, -l * 0.55), Vector3(-15, 0, e * 25)))
-				vis.add_child(MU.cyl(0.01, 0.015, 0.2, Color(0.8, 0.75, 0.6), Vector3(e * 0.16, h * 1.3, -l * 0.62), Vector3(-60, 0, e * 30)))
-			_legs(w, h, l, fur.darkened(0.15), h * 0.5, 0.05)
-		"rabbit":
-			var fur := Color(0.55, 0.5, 0.43)
-			vis.add_child(MU.sphere(w * 0.5, fur, Vector3(0, h * 0.5, 0.02), Vector3(1, 1, 1.35)))
-			vis.add_child(MU.sphere(w * 0.32, fur, Vector3(0, h * 0.75, -l * 0.38)))
-			vis.add_child(MU.sphere(w * 0.15, Color(0.95, 0.95, 0.95), Vector3(0, h * 0.6, l * 0.42)))
-			for e in [-1, 1]:
-				vis.add_child(MU.box(Vector3(0.035, 0.2, 0.06), fur, Vector3(e * 0.04, h * 1.05, -l * 0.33), Vector3(-15, 0, e * 10)))
-				vis.add_child(MU.sphere(0.018, Color(0.05, 0.05, 0.05), Vector3(e * 0.06, h * 0.8, -l * 0.5)))
-			_legs(w, h, l, fur.darkened(0.1), h * 0.25, 0.03)
-		"boar":
-			var fur := Color(0.2, 0.16, 0.12)
-			vis.add_child(MU.capsule(w * 0.5, l * 0.95, fur, Vector3(0, h * 0.6, 0), Vector3(90, 0, 0)))
-			vis.add_child(MU.box(Vector3(0.05, h * 0.25, l * 0.6), fur.darkened(0.3), Vector3(0, h * 0.9, -l * 0.05)))   # щетина
-			vis.add_child(MU.cyl(w * 0.18, w * 0.38, l * 0.4, fur, Vector3(0, h * 0.55, -l * 0.6), Vector3(-95, 0, 0)))
-			vis.add_child(MU.cyl(w * 0.15, w * 0.15, 0.04, Color(0.35, 0.25, 0.22), Vector3(0, h * 0.53, -l * 0.81), Vector3(90, 0, 0)))
-			for e in [-1, 1]:
-				vis.add_child(MU.cyl(0.0, 0.02, 0.13, Color(0.95, 0.92, 0.8), Vector3(e * 0.08, h * 0.5, -l * 0.74), Vector3(-30, 0, e * -20)))
-				vis.add_child(MU.box(Vector3(0.04, 0.1, 0.08), fur, Vector3(e * 0.12, h * 0.8, -l * 0.48), Vector3(0, 0, e * 30)))
-			_legs(w, h, l, fur.darkened(0.2), h * 0.4, 0.06)
-		"bear":
-			var fur := Color(0.24, 0.15, 0.09)
-			vis.add_child(MU.capsule(w * 0.5, l * 0.95, fur, Vector3(0, h * 0.62, 0), Vector3(90, 0, 0)))
-			vis.add_child(MU.sphere(w * 0.45, fur, Vector3(0, h * 0.82, -l * 0.15)))          # горб
-			vis.add_child(MU.sphere(w * 0.32, fur, Vector3(0, h * 0.7, -l * 0.55)))
-			vis.add_child(MU.cyl(w * 0.1, w * 0.16, w * 0.3, Color(0.4, 0.3, 0.2), Vector3(0, h * 0.64, -l * 0.7), Vector3(-90, 0, 0)))
-			vis.add_child(MU.sphere(w * 0.05, Color(0.02, 0.02, 0.02), Vector3(0, h * 0.66, -l * 0.78)))
-			for e in [-1, 1]:
-				vis.add_child(MU.sphere(w * 0.09, fur, Vector3(e * w * 0.24, h * 0.9, -l * 0.52)))
-			_legs(w, h, l, fur.darkened(0.15), h * 0.5, 0.11)
-
-
-func _legs(w: float, h: float, l: float, c: Color, leg_len: float, r: float) -> void:
-	for p in [Vector3(-w * 0.3, 0, -l * 0.32), Vector3(w * 0.3, 0, -l * 0.32), Vector3(-w * 0.3, 0, l * 0.32), Vector3(w * 0.3, 0, l * 0.32)]:
-		var piv := Node3D.new()
-		piv.position = p + Vector3(0, leg_len, 0)
-		piv.add_child(MU.capsule(r, leg_len + r, c, Vector3(0, -leg_len * 0.5, 0)))
-		vis.add_child(piv)
-		legs.append(piv)
+	# у оленей — самец с рогами или самка (по имени, одинаково у всех игроков)
+	var variant := (name.hash() & 0xff) % 2 if kind == "deer" else 0
+	var m := A3.animal(kind, variant)
+	vis.add_child(m)
+	anim_player = m.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	anim_names = ItemsDB.ANIMAL_MODELS[kind].get("anims", {})
+	if ItemsDB.ANIMAL_MODELS[kind].get("proc", false):
+		skel = m.find_child("*Skeleton*", true, false) as Skeleton3D
+		if skel == null:
+			for c in m.find_children("*", "Skeleton3D", true, false):
+				skel = c
+				break
+		if skel:
+			for b in ["leg_fl", "leg_fr", "leg_bl", "leg_br"]:
+				leg_bones.append(skel.find_bone(b))
+			head_bone = skel.find_bone("head")
 
 
 func _ready() -> void:
@@ -309,6 +278,33 @@ func apply_hit(zones: Array, dmg: float, shooter_id: int, from: Vector3) -> Stri
 	return "hit_" + best
 
 
+## Сбит домом на колёсах (хост).
+func vehicle_hit(push: Vector3, dmg: float) -> void:
+	_fling = push
+	hp -= dmg
+	bleed += dmg * 0.05
+	bleeding = bleed > 0.3
+	leg_hit = 1.0 if dmg > max_hp * 0.3 else leg_hit
+	var side := Vector3(push.x, 0, push.z)
+	if side.length() > 0.1:
+		global_position += side.normalized() * 2.0
+		global_position.y = TerrainGen.height_at(global_position.x, global_position.z)
+	world.sfx_all("hit_flesh", global_position + Vector3.UP * 0.6, 2.0, 0.8)
+	if hp <= 0.0:
+		last_overkill = 0.0
+		die()
+		return
+	if ItemsDB.ANIMALS[kind].has("aggro"):
+		state = "flee"   # медведь/кабан сначала отскакивает, потом может кинуться
+		state_t = 1.5
+		flee_from = global_position - side
+	else:
+		flee(global_position - side, 10.0)
+
+
+var _fling := Vector3.ZERO
+
+
 func die() -> void:
 	if is_queued_for_deletion():
 		return
@@ -318,7 +314,8 @@ func die() -> void:
 	elif last_overkill > 3.2:
 		q = 0.5
 	if q > 0.0:
-		world.spawn_item("carcass_" + kind, global_position + Vector3.UP * 0.7, Vector3(randf_range(-1, 1), 3.0, randf_range(-1, 1)), q)
+		var vel := Vector3(randf_range(-1, 1), 3.0, randf_range(-1, 1)) if _fling == Vector3.ZERO else _fling
+		world.spawn_item("carcass_" + kind, global_position + Vector3.UP * 0.7, vel, q)
 	else:
 		world.broadcast(T.t("msg_obliterated", [T.t("animal_" + kind)]))
 		world.rpc("fx_burst", global_position + Vector3.UP * 0.4, 1)
@@ -327,16 +324,42 @@ func die() -> void:
 
 
 # ======================================================================= АНИМАЦИЯ
+func _play(key: String, spd := 1.0) -> void:
+	if anim_player == null:
+		return
+	var nm := str(anim_names.get(key, anim_names.get("idle", "")))
+	if nm == "" or not anim_player.has_animation(nm):
+		return
+	if nm != _cur_anim:
+		_cur_anim = nm
+		anim_player.play(nm, 0.25)
+	anim_player.speed_scale = spd
+
+
 func _animate(delta: float) -> void:
 	if delta <= 0.0:
 		return
 	var v := (global_position - last_pos).length() / delta
 	last_pos = global_position
+	var d: Dictionary = ItemsDB.ANIMALS[kind]
+	if v > float(d.walk) * 1.6:
+		_play("run", clampf(v / float(d.run) * 1.1, 0.6, 1.6))
+	elif v > 0.25:
+		_play("walk", clampf(v / float(d.walk), 0.5, 1.8))
+	else:
+		_play("eat" if fmod(anim_phase, 20.0) > 12.0 and anim_names.has("eat") else "idle", 1.0)
 	anim_phase += delta * (2.0 + v * 2.2)
-	var k := clampf(v / 4.0, 0.0, 1.0)
-	for i in legs.size():
-		var ph := anim_phase + (PI if i % 3 == 0 else 0.0)
-		(legs[i] as Node3D).rotation.x = sin(ph) * 0.7 * k
+	if skel and not leg_bones.is_empty():
+		var k := clampf(v / 3.0, 0.0, 1.0)
+		var sw := 0.55 * k
+		for i in leg_bones.size():
+			if int(leg_bones[i]) < 0:
+				continue
+			var ph := anim_phase + (PI if i == 1 or i == 2 else 0.0)
+			skel.set_bone_pose_rotation(leg_bones[i], Quaternion(Vector3.RIGHT, sin(ph) * sw))
+		if head_bone >= 0:
+			skel.set_bone_pose_rotation(head_bone, Quaternion(Vector3.RIGHT, sin(anim_phase * 0.5) * 0.08 * (1.0 - k)))
+	_leave_tracks(delta)
 	if bleeding:
 		_blood_t -= delta
 		if _blood_t <= 0.0 and v > 0.5:
@@ -345,3 +368,23 @@ func _animate(delta: float) -> void:
 		elif _blood_t <= -3.0:
 			_blood_t = 0.0
 			world.add_blood(global_position)
+
+
+## Следы и помёт рисует каждый игрок у себя (по синхронизированному положению зверя).
+func _leave_tracks(delta: float) -> void:
+	if world == null or not world.has_method("add_track"):
+		return
+	_track_t -= delta
+	if _track_t > 0.0:
+		return
+	_track_t = 0.25
+	var step := {"rabbit": 0.6, "deer": 1.3, "boar": 1.1, "bear": 1.5}.get(kind, 1.2) as float
+	var mv := global_position - _track_from
+	mv.y = 0.0
+	if mv.length() >= step:
+		world.add_track(kind, global_position, atan2(mv.x, mv.z), name, bleeding)
+		_track_from = global_position
+	_drop_t -= 0.25 * (2.0 if mv.length() < 0.1 else 1.0)
+	if _drop_t <= 0.0:
+		_drop_t = randf_range(90.0, 200.0)
+		world.add_track(kind, global_position - global_basis.z * -0.4, 0.0, name, false, true)
