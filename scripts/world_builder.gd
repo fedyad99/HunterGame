@@ -37,6 +37,10 @@ static func _terrain(w: Node3D) -> void:
 	sm.shader = load("res://shaders/terrain.gdshader")
 	sm.set_shader_parameter("noise_tex", _noise_tex(0.02))
 	sm.set_shader_parameter("noise_nrm", _noise_tex(0.03, true))
+	for k in ["grass", "dirt", "rock", "sand"]:
+		sm.set_shader_parameter("tex_" + k, load("res://assets/textures/%s_color.jpg" % k))
+	sm.set_shader_parameter("nrm_grass", load("res://assets/textures/grass_normal.jpg"))
+	sm.set_shader_parameter("nrm_rock", load("res://assets/textures/rock_normal.jpg"))
 	mi.material_override = sm
 	w.add_child(mi)
 	var body := StaticBody3D.new()
@@ -330,6 +334,10 @@ static func _shop(w: Node3D, on: Node3D, idx: int) -> void:
 	for i in 6:
 		on.add_child(MU.box(Vector3(0.5, 0.4, 0.4), Color(0.3 + i * 0.08, 0.25, 0.2), c + Vector3(-3.5 + i * 1.2, 1.5, -3.0)))
 	on.add_child(MU.label3d(T.t("sign_shop"), c + Vector3(0, 3.3, 1.8), 96, Color(1, 0.95, 0.8), false))
+	var th := Thermometer.new()
+	th.position = c + Vector3(3.2, 1.6, 4.0)
+	on.add_child(th)
+	on.add_child(MU.box(Vector3(0.14, 2.4, 0.14), Color(0.35, 0.24, 0.14), c + Vector3(3.2, 1.2, 3.93)))
 	w.shop_spawns.append(on.position + c + Vector3(0, 1.4, 2.8))
 	var lamp := OmniLight3D.new()
 	lamp.position = c + Vector3(0, 3.5, 0.5)

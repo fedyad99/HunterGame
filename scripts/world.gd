@@ -621,9 +621,9 @@ func rv_input(t: float, s: float, b: float) -> void:
 
 
 @rpc("any_peer", "call_local", "reliable")
-func req_gear(d: int) -> void:
+func req_gear(g: int) -> void:
 	if multiplayer.is_server() and rv and rv.seats[0] == _sender():
-		rv.shift(d)
+		rv.set_gear(g)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -870,6 +870,9 @@ func _server_tick(delta: float) -> void:
 					_push_state()
 
 
+var _thermo_t := 0.0
+
+
 func _process(delta: float) -> void:
 	_update_sky(delta)
 	_update_fx(delta)
@@ -877,6 +880,10 @@ func _process(delta: float) -> void:
 		if not local_player.cam.current:
 			local_player.cam.current = true
 	hud.update_hud(local_player)
+	_thermo_t -= delta
+	if _thermo_t <= 0.0:
+		_thermo_t = 1.0
+		get_tree().call_group("thermo", "set_temp", ambient_temp())
 
 
 # ======================================================================= ПОГОДА, ВРЕМЯ, ТЕПЛО

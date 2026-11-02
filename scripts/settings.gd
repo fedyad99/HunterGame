@@ -3,8 +3,8 @@ extends Node
 
 const FILE := "user://options.cfg"
 const REBINDABLE := ["move_forward", "move_back", "move_left", "move_right", "sprint", "jump", "interact",
-	"inventory", "emote_menu", "flop", "drop", "toilet", "camera_toggle", "flashlight", "reload", "ammo_type", "horn",
-	"gear_up", "gear_down", "winch_front", "winch_rear", "slot_1", "slot_2", "slot_3", "slot_4"]
+	"inventory", "emote_menu", "flop", "drop", "toilet", "watch", "flashlight", "reload", "ammo_type", "horn",
+	"winch_front", "winch_rear", "slot_1", "slot_2", "slot_3", "slot_4"]
 
 var mouse_sens := 1.0
 var invert_y := false

@@ -13,7 +13,7 @@ const SEATS := [
 	[Vector3(0.72, 1.12, -2.35), PI / 2.0],   # 3 диван
 ]
 const STAND := [Vector3(0.1, 1.1, 1.6), Vector3(-0.2, 1.1, 1.6), Vector3(0.0, 1.1, -1.5), Vector3(0.0, 1.1, -2.35)]
-const BASE_FORCE := 3600.0
+const BASE_FORCE := 5200.0
 const ENGINE_MULT := [1.0, 1.35, 1.75]
 const TANK := [70.0, 110.0, 160.0]
 const ARMOR_MULT := [1.0, 0.6, 0.35]
@@ -26,10 +26,14 @@ const IDLE_RPM := 850.0
 const MAX_RPM := 4600.0
 const CABLE_LEN := 30.0
 const WINCH_FORCE := 28000.0
-const HOOKS := [Vector3(0, 0.75, 4.35), Vector3(0.45, 0.75, -3.6)]
+const EXT := 3.4                 # на сколько метров салон длиннее прежнего
+const H_UP := 0.4                # и выше
+const ROOF_Y := 3.2 + H_UP
+const REAR_Z := -3.45 - EXT
+const HOOKS := [Vector3(0, 0.75, 4.35), Vector3(0.45, 0.75, REAR_Z - 0.15)]
 # габарит салона для «езды внутри» (локальные координаты)
-const RIDE_MIN := Vector3(-1.35, 0.6, -3.7)
-const RIDE_MAX := Vector3(1.35, 4.6, 3.5)
+const RIDE_MIN := Vector3(-1.35, 0.6, REAR_Z - 0.25)
+const RIDE_MAX := Vector3(1.35, 5.0, 3.5)
 
 var sync_xform := Transform3D()
 var sync_vel := Vector3.ZERO
@@ -72,10 +76,13 @@ var wheels: Array = []
 var vis_wheels: Array = []
 var _wheel_rot := 0.0
 var steering_wheel: Node3D
-var dash_speed: Label3D
-var dash_info: Label3D
-var dash_warn: Label3D
-var rpm_needle: Node3D
+var needles := {}          # speed / rpm / fuel / engine -> Node3D
+var lamps := {}            # имя -> MeshInstance3D (лампочки на панели)
+var btn_vis := {}          # кнопки на панели
+var lever: Node3D          # рычаг КПП
+var lever_pos := Vector2.ZERO   # текущее положение рычага (-1..1)
+var lever_hold := false         # игрок держит рычаг мышью (положение задаёт он)
+var thermo: Thermometer
 
 
 func setup(data: Dictionary) -> void:
@@ -83,9 +90,9 @@ func setup(data: Dictionary) -> void:
 	position = data.pos
 	rotation.y = float(data.get("yaw", 0.0))
 	sync_xform = Transform3D(Basis(Vector3.UP, rotation.y), data.pos)
-	mass = 2200.0
+	mass = 3200.0
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = Vector3(0, 0.35, 0)
+	center_of_mass = Vector3(0, 0.35, -1.2)
 	angular_damp = 0.6
 	collision_layer = MU.L_RV
 	collision_mask = MU.L_WORLD | MU.L_ITEMS
@@ -128,46 +135,53 @@ func _build() -> void:
 	var cream := Color(0.9, 0.86, 0.75)
 	var brown := Color(0.45, 0.28, 0.15)
 	var dark := Color(0.2, 0.2, 0.2)
-	var inner := Color(0.75, 0.68, 0.55)
 	var glass := MU.mat(Color(0.35, 0.45, 0.5, 0.3), 0.05, 0.0, 0.3)
+	var cz := -0.1 - EXT * 0.5          # центр удлинённой части по Z
+	var lz := 6.8 + EXT                 # длина кузова
+	var wh := 2.1 + H_UP                # высота стен
+	var wy := 2.1 + H_UP * 0.5          # центр стен по Y
 	var v := Node3D.new()
 	v.name = "Vis"
 	add_child(v)
 	# рама и пол
-	_part(v, Vector3(2.4, 0.55, 7.0), Vector3(0, 0.72, -0.1), dark)
-	_part(v, Vector3(2.3, 0.08, 6.8), Vector3(0, FLOOR_Y - 0.04, -0.1), Color(0.42, 0.3, 0.2))
+	_part(v, Vector3(2.4, 0.55, 7.0 + EXT), Vector3(0, 0.72, cz), dark)
+	_part(v, Vector3(2.3, 0.08, lz), Vector3(0, FLOOR_Y - 0.04, cz), Color(0.42, 0.3, 0.2))
 	# стены: левая (+X) целая, правая (−X) с дверным проёмом z 0.3..1.3
-	_wall(v, Vector3(0.1, 2.1, 6.8), Vector3(1.15, 2.1, -0.1), cream, glass)
-	_wall(v, Vector3(0.1, 2.1, 3.8), Vector3(-1.15, 2.1, -1.6), cream, glass)
-	_wall(v, Vector3(0.1, 2.1, 1.9), Vector3(-1.15, 2.1, 2.35), cream, glass)
-	_part(v, Vector3(0.1, 0.45, 1.0), Vector3(-1.15, 2.93, 0.8), cream)
-	_part(v, Vector3(2.4, 2.1, 0.1), Vector3(0, 2.1, -3.45), cream)
+	_wall(v, Vector3(0.1, wh, lz), Vector3(1.15, wy, cz), cream, glass)
+	_wall(v, Vector3(0.1, wh, 3.8 + EXT), Vector3(-1.15, wy, -1.6 - EXT * 0.5), cream, glass)
+	_wall(v, Vector3(0.1, wh, 1.9), Vector3(-1.15, wy, 2.35), cream, glass)
+	_part(v, Vector3(0.1, 0.55, 1.0), Vector3(-1.15, ROOF_Y - 0.3, 0.8), cream)   # перемычка над дверью
+	_part(v, Vector3(2.4, wh, 0.1), Vector3(0, wy, REAR_Z), cream)
 	# полосы снаружи
-	v.add_child(MU.box(Vector3(2.44, 0.18, 6.82), brown, Vector3(0, 1.55, -0.1)))
-	v.add_child(MU.box(Vector3(2.44, 0.06, 6.82), Color(0.85, 0.5, 0.1), Vector3(0, 1.72, -0.1)))
+	v.add_child(MU.box(Vector3(2.44, 0.18, lz + 0.02), brown, Vector3(0, 1.55, cz)))
+	v.add_child(MU.box(Vector3(2.44, 0.06, lz + 0.02), Color(0.85, 0.5, 0.1), Vector3(0, 1.72, cz)))
 	# крыша (на неё можно залезть по лестнице)
-	_part(v, Vector3(2.4, 0.1, 6.8), Vector3(0, 3.2, -0.1), cream)
-	v.add_child(MU.box(Vector3(2.0, 0.06, 3.0), dark, Vector3(0, 3.3, -1.2)))
+	_part(v, Vector3(2.4, 0.1, lz), Vector3(0, ROOF_Y, cz), cream)
+	v.add_child(MU.box(Vector3(2.0, 0.06, 3.0 + EXT * 0.7), dark, Vector3(0, ROOF_Y + 0.1, -1.2 - EXT * 0.35)))
 	for e in [-1, 1]:
-		v.add_child(MU.box(Vector3(0.05, 0.15, 3.0), dark, Vector3(e * 1.0, 3.35, -1.2)))
+		v.add_child(MU.box(Vector3(0.05, 0.15, 3.0 + EXT * 0.7), dark, Vector3(e * 1.0, ROOF_Y + 0.15, -1.2 - EXT * 0.35)))
+	# кондиционер и люк на крыше
+	v.add_child(MU.box(Vector3(0.9, 0.22, 1.3), Color(0.85, 0.85, 0.87), Vector3(0.0, ROOF_Y + 0.2, -3.0)))
+	v.add_child(MU.box(Vector3(0.95, 0.04, 1.35), Color(0.6, 0.6, 0.62), Vector3(0.0, ROOF_Y + 0.33, -3.0)))
+	v.add_child(MU.box(Vector3(0.7, 0.04, 0.7), MU.mat(Color(0.5, 0.7, 0.85, 0.5), 0.1, 0.0, 0.3), Vector3(0.0, ROOF_Y + 0.07, -0.6)))
 	# кабина: капот, приборная панель, лобовое стекло
 	_part(v, Vector3(2.3, 0.75, 1.0), Vector3(0, 1.0, 3.85), cream)
 	_part(v, Vector3(2.3, 0.08, 1.0), Vector3(0, 1.42, 3.85), brown)
 	_part(v, Vector3(2.2, 0.85, 0.5), Vector3(0, 1.475, 3.1), Color(0.36, 0.33, 0.29))
-	_shape(Vector3(2.3, 1.3, 0.08), Vector3(0, 2.55, 3.35))
-	v.add_child(MU.box(Vector3(2.3, 1.3, 0.04), glass, Vector3(0, 2.55, 3.35)))
-	v.add_child(MU.box(Vector3(2.4, 0.1, 0.12), cream, Vector3(0, 3.18, 3.35)))
+	_shape(Vector3(2.3, 1.3 + H_UP, 0.08), Vector3(0, 2.55 + H_UP * 0.5, 3.35))
+	v.add_child(MU.box(Vector3(2.3, 1.3 + H_UP, 0.04), glass, Vector3(0, 2.55 + H_UP * 0.5, 3.35)))
+	v.add_child(MU.box(Vector3(2.4, 0.1, 0.12), cream, Vector3(0, ROOF_Y - 0.02, 3.35)))
 	v.add_child(MU.box(Vector3(2.4, 0.3, 0.3), dark, Vector3(0, 0.75, 4.4)))   # бампер
 	# ступеньки у двери
 	for i in 3:
 		var sp := Vector3(-1.45 - i * 0.3, FLOOR_Y - 0.3 - i * 0.3, 0.8)
 		_part(v, Vector3(0.3, 0.08, 0.9), sp, Color(0.35, 0.35, 0.36))
 	# лестница на крышу (сзади)
-	for i in 8:
-		v.add_child(MU.box(Vector3(0.45, 0.04, 0.04), dark, Vector3(-0.6, 0.6 + i * 0.35, -3.56)))
+	for i in 11:
+		v.add_child(MU.box(Vector3(0.45, 0.04, 0.04), dark, Vector3(-0.6, 0.6 + i * 0.35, REAR_Z - 0.11)))
 	for e in [-1, 1]:
-		v.add_child(MU.box(Vector3(0.04, 2.8, 0.04), dark, Vector3(-0.6 + e * 0.22, 1.9, -3.56)))
-	add_child(MU.area_box(Vector3(0.7, 2.6, 0.5), Vector3(-0.6, 1.9, -3.75), "rv_ladder", "St_ladder"))
+		v.add_child(MU.box(Vector3(0.04, 3.7, 0.04), dark, Vector3(-0.6 + e * 0.22, 2.4, REAR_Z - 0.11)))
+	add_child(MU.area_box(Vector3(0.7, 3.4, 0.5), Vector3(-0.6, 2.3, REAR_Z - 0.3), "rv_ladder", "St_ladder"))
 	# фары
 	for e in [-1, 1]:
 		v.add_child(MU.box(Vector3(0.35, 0.2, 0.05), MU.mat(Color(1.0, 0.95, 0.8), 0.2, 2.0), Vector3(e * 0.8, 1.15, 4.37)))
@@ -181,6 +195,9 @@ func _build() -> void:
 		sl.visible = false
 		add_child(sl)
 		lights.append(sl)
+	# задние фонари
+	for e in [-1, 1]:
+		v.add_child(MU.box(Vector3(0.18, 0.3, 0.05), MU.mat(Color(0.9, 0.05, 0.05), 0.3, 1.2), Vector3(e * 1.0, 1.5, REAR_Z - 0.06)))
 	# ---- салон
 	# кресла водителя и пассажира
 	for e in [1, -1]:
@@ -193,22 +210,38 @@ func _build() -> void:
 	# стол
 	v.add_child(MU.box(Vector3(0.7, 0.05, 1.0), Color(0.5, 0.36, 0.22), Vector3(0.1, 1.8, -1.95)))
 	v.add_child(MU.box(Vector3(0.08, 0.7, 0.08), dark, Vector3(0.1, 1.42, -1.95)))
-	# кровать сзади
-	v.add_child(MU.box(Vector3(2.2, 0.5, 0.9), Color(0.4, 0.3, 0.25), Vector3(0, 1.3, -2.95)))
-	v.add_child(MU.box(Vector3(2.1, 0.12, 0.85), Color(0.85, 0.85, 0.9), Vector3(0, 1.6, -2.95)))
 	# плита у правой стены
 	_part(v, Vector3(0.6, 0.9, 1.1), Vector3(-0.82, 1.5, -1.2), Color(0.55, 0.55, 0.57))
 	v.add_child(MU.box(Vector3(0.5, 0.03, 0.9), MU.mat(Color(0.1, 0.1, 0.1), 0.3, 0.0, 0.8), Vector3(-0.82, 1.97, -1.2)))
 	add_child(MU.area_box(Vector3(0.8, 0.6, 1.2), Vector3(-0.72, 2.0, -1.2), "rv_stove", "St_stove"))
+	# кухонная тумба с раковиной вдоль правой стены дальше
+	_part(v, Vector3(0.6, 0.9, 1.6), Vector3(-0.82, 1.5, -2.9), Color(0.5, 0.36, 0.22))
+	v.add_child(MU.box(Vector3(0.62, 0.04, 1.62), Color(0.78, 0.78, 0.8), Vector3(-0.82, 1.97, -2.9)))
+	v.add_child(MU.box(Vector3(0.4, 0.05, 0.5), Color(0.35, 0.37, 0.4), Vector3(-0.82, 1.99, -2.9)))
+	# двухъярусная кровать у левой стены и широкая кровать в хвосте
+	var bz := REAR_Z + 1.3
+	v.add_child(MU.box(Vector3(2.2, 0.5, 1.7), Color(0.4, 0.3, 0.25), Vector3(0, 1.3, bz)))
+	v.add_child(MU.box(Vector3(2.1, 0.14, 1.65), Color(0.85, 0.85, 0.9), Vector3(0, 1.62, bz)))
+	v.add_child(MU.box(Vector3(0.7, 0.1, 0.45), Color(0.9, 0.9, 0.95), Vector3(0.6, 1.74, bz - 0.55)))
+	v.add_child(MU.box(Vector3(0.7, 0.1, 0.45), Color(0.9, 0.9, 0.95), Vector3(-0.6, 1.74, bz - 0.55)))
+	var cz2 := REAR_Z + 3.3
+	for lvl in 2:
+		v.add_child(MU.box(Vector3(0.75, 0.1, 1.9), Color(0.4, 0.3, 0.25), Vector3(0.78, 1.45 + lvl * 0.95, cz2)))
+		v.add_child(MU.box(Vector3(0.72, 0.12, 1.85), Color(0.55, 0.65, 0.75), Vector3(0.78, 1.55 + lvl * 0.95, cz2)))
+	for zz in [cz2 - 0.9, cz2 + 0.9]:
+		v.add_child(MU.box(Vector3(0.06, 2.2, 0.06), dark, Vector3(1.12, 2.15, zz)))
 	# шкаф-сушилка у левой стены
-	_part(v, Vector3(0.55, 2.0, 0.9), Vector3(0.85, 2.05, 0.75), brown)
+	_part(v, Vector3(0.55, 2.0 + H_UP, 0.9), Vector3(0.85, 2.05 + H_UP * 0.5, 0.75), brown)
 	add_child(MU.area_box(Vector3(0.7, 1.6, 1.0), Vector3(0.62, 2.0, 0.75), "rv_wardrobe", "St_wardrobe"))
+	# коврик и ящики
+	v.add_child(MU.box(Vector3(1.2, 0.01, 1.8), Color(0.5, 0.2, 0.15), Vector3(0.0, FLOOR_Y + 0.01, -3.9)))
+	_part(v, Vector3(0.5, 0.6, 0.5), Vector3(-0.85, 1.35, REAR_Z + 1.2), Color(0.5, 0.36, 0.22))
 	# места
 	for i in 4:
 		var a := MU.area_box(Vector3(0.6, 0.9, 0.6), SEATS[i][0] + Vector3(0, 0.6, 0), "rv_seat", "St_seat%d" % i)
 		a.set_meta("seat", i)
 		add_child(a)
-	# ---- приборная панель
+	# ---- приборная панель и рычаг КПП
 	_build_dashboard(v)
 	# ---- снаружи: разделочный стол, бак, двигатель, крюки
 	v.add_child(MU.box(Vector3(0.7, 0.06, 1.3), Color(0.55, 0.4, 0.25), Vector3(1.6, 1.05, -2.3)))
@@ -216,6 +249,11 @@ func _build() -> void:
 	v.add_child(MU.cyl(0.08, 0.08, 0.05, dark, Vector3(1.22, 1.2, -0.6), Vector3(0, 0, 90)))
 	add_child(MU.area_box(Vector3(0.5, 0.6, 0.6), Vector3(1.4, 1.2, -0.6), "rv_fuel", "St_fuel"))
 	add_child(MU.area_box(Vector3(1.8, 0.6, 1.0), Vector3(0, 1.6, 3.85), "rv_engine", "St_engine"))
+	# уличный термометр рядом с дверью
+	thermo = Thermometer.new()
+	thermo.position = Vector3(-1.23, 2.1, 1.95)
+	thermo.rotation.y = -PI * 0.5
+	v.add_child(thermo)
 	for i in 2:
 		var hp_: Vector3 = HOOKS[i]
 		v.add_child(MU.box(Vector3(0.45, 0.3, 0.25), Color(0.6, 0.15, 0.1), hp_))
@@ -234,15 +272,15 @@ func _build() -> void:
 		cable.visible = false
 		add_child(cable)
 		cables.append(cable)
-	# колёса
-	for wp in [Vector3(1.1, 0.55, 2.6), Vector3(-1.1, 0.55, 2.6), Vector3(1.1, 0.55, -2.4), Vector3(-1.1, 0.55, -2.4)]:
+	# колёса: передняя ось и задняя (длинная колёсная база)
+	for wp in [Vector3(1.1, 0.55, 2.6), Vector3(-1.1, 0.55, 2.6), Vector3(1.1, 0.55, -2.4 - EXT * 0.75), Vector3(-1.1, 0.55, -2.4 - EXT * 0.75)]:
 		var w := VehicleWheel3D.new()
 		w.position = wp
 		w.wheel_radius = 0.5
 		w.wheel_rest_length = 0.3
 		w.suspension_travel = 0.45
 		w.suspension_stiffness = 26.0
-		w.suspension_max_force = 50000.0
+		w.suspension_max_force = 60000.0
 		w.damping_compression = 0.35
 		w.damping_relaxation = 0.5
 		w.wheel_friction_slip = 2.4
@@ -254,14 +292,14 @@ func _build() -> void:
 		add_child(w)
 		wheels.append(w)
 	_build_mirrors()
-	exhaust = _particles(Color(0.35, 0.35, 0.35, 0.4), Vector3(0.9, 0.5, -3.5), 0.08)
+	exhaust = _particles(Color(0.35, 0.35, 0.35, 0.4), Vector3(0.9, 0.5, REAR_Z - 0.05), 0.08)
 	smoke = _particles(Color(0.1, 0.1, 0.1, 0.6), Vector3(0, 1.6, 4.2), 0.2)
 	smoke.amount = 24
 	cabin_light = OmniLight3D.new()
-	cabin_light.position = Vector3(0, 2.9, -0.5)
+	cabin_light.position = Vector3(0, ROOF_Y - 0.3, -0.5 - EXT * 0.5)
 	cabin_light.light_color = Color(1.0, 0.85, 0.6)
-	cabin_light.omni_range = 5.0
-	cabin_light.light_energy = 0.8
+	cabin_light.omni_range = 8.0
+	cabin_light.light_energy = 0.9
 	add_child(cabin_light)
 	engine_snd = AudioStreamPlayer3D.new()
 	engine_snd.stream = Sfx.get_stream("engine")
@@ -278,8 +316,44 @@ func _build() -> void:
 	add_child(winch_snd)
 
 
+# ---- приборная панель: только круглые приборы, лампочки-иконки и кнопки-иконки
+const FACE := Basis(Quaternion(Vector3(0, 1, 0), PI) * Quaternion(Vector3(1, 0, 0), -0.9599310885968813))
+
+
+func _panel_pos(xl: float, yl: float, lift := 0.012) -> Vector3:
+	return Vector3(0.55, 1.93, 2.98) + FACE.x * xl + FACE.y * yl + FACE.z * lift
+
+
+func _quad(v: Node3D, tex: Texture2D, size: float, pos: Vector3, col: Color, emit := 0.0, transparent := true) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var qm := QuadMesh.new()
+	qm.size = Vector2(size, size)
+	mi.mesh = qm
+	var m := StandardMaterial3D.new()
+	m.albedo_texture = tex
+	m.albedo_color = col
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED if emit > 0.0 else BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	if transparent:
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mi.material_override = m
+	mi.transform = Transform3D(FACE, pos)
+	v.add_child(mi)
+	return mi
+
+
+func _gauge(v: Node3D, key: String, xl: float, yl: float, r: float, ticks: int, long_every: int, red_from: float, icon_kind := "", icon_col := Color(0.9, 0.9, 0.8)) -> void:
+	_quad(v, DashIcons.dial(ticks, long_every, red_from), r * 2.0, _panel_pos(xl, yl, 0.008), Color.WHITE, 0.0, false)
+	if icon_kind != "":
+		_quad(v, DashIcons.icon(icon_kind), r * 0.7, _panel_pos(xl, yl - r * 0.48, 0.011), icon_col, 1.0)
+	var needle := Node3D.new()
+	needle.transform = Transform3D(FACE, _panel_pos(xl, yl, 0.014))
+	v.add_child(needle)
+	needle.add_child(MU.box(Vector3(r * 0.07, r * 0.85, 0.004), MU.mat(Color(1, 0.3, 0.1), 0.5, 2.0), Vector3(0, r * 0.35, 0)))
+	needle.add_child(MU.cyl(r * 0.12, r * 0.12, 0.008, Color(0.15, 0.15, 0.15), Vector3.ZERO, Vector3(90, 0, 0), 10))
+	needles[key] = needle
+
+
 func _build_dashboard(v: Node3D) -> void:
-	var face := Basis.from_euler(Vector3(deg_to_rad(-55), PI, 0))
 	# руль
 	steering_wheel = Node3D.new()
 	steering_wheel.position = Vector3(0.55, 2.12, 2.72)
@@ -294,50 +368,101 @@ func _build_dashboard(v: Node3D) -> void:
 	steering_wheel.add_child(tm)
 	steering_wheel.add_child(MU.box(Vector3(0.32, 0.03, 0.04), Color(0.1, 0.1, 0.1)))
 	v.add_child(MU.cyl(0.03, 0.03, 0.35, Color(0.1, 0.1, 0.1), Vector3(0.55, 1.98, 2.86), Vector3(-60, 0, 0)))
-	# тахометр со стрелкой
-	var gauge := Node3D.new()
-	gauge.transform = Transform3D(face, Vector3(-0.42, 1.93, 2.97))
-	v.add_child(gauge)
-	gauge.add_child(MU.cyl(0.11, 0.11, 0.02, Color(0.05, 0.05, 0.05), Vector3.ZERO, Vector3(90, 0, 0), 20))
-	rpm_needle = Node3D.new()
-	rpm_needle.position = Vector3(0, 0, 0.015)
-	gauge.add_child(rpm_needle)
-	rpm_needle.add_child(MU.box(Vector3(0.008, 0.09, 0.005), MU.mat(Color(1, 0.3, 0.1), 0.5, 2.0), Vector3(0, 0.04, 0)))
-	dash_speed = _dash_label(Vector3(-0.18, 1.93, 3.0), face, 34)
-	dash_info = _dash_label(Vector3(-0.72, 1.93, 3.0), face, 22)
-	dash_warn = _dash_label(Vector3(-0.3, 1.93, 3.2), face, 20)
-	dash_warn.modulate = Color(1, 0.4, 0.2)
-	# кнопки
-	var btns := [["winch_front", "btn_winch_front"], ["winch_rear", "btn_winch_rear"], ["lights", "btn_lights"], ["horn", "btn_horn"]]
+	# приборы: спидометр, тахометр, топливо, состояние двигателя
+	_gauge(v, "speed", 0.0, 0.0, 0.11, 24, 4, -1.0)
+	_gauge(v, "rpm", -0.235, 0.0, 0.085, 10, 2, 0.8)
+	_gauge(v, "fuel", 0.19, 0.085, 0.05, 4, 4, -1.0, "fuel", Color(0.9, 0.85, 0.5))
+	_gauge(v, "engine", 0.19, -0.05, 0.05, 4, 4, -1.0, "engine", Color(0.9, 0.85, 0.5))
+	# контрольные лампочки-иконки
+	var lamp_defs := [["fuel", "fuel", Color(1.0, 0.6, 0.1)], ["engine", "engine", Color(1.0, 0.25, 0.1)],
+		["winch", "winch_front", Color(0.3, 0.9, 1.0)], ["lights", "lights", Color(0.4, 1.0, 0.4)], ["brake", "brake", Color(1.0, 0.2, 0.15)]]
+	for i in lamp_defs.size():
+		var d: Array = lamp_defs[i]
+		var q := _quad(v, DashIcons.icon(d[1]), 0.042, _panel_pos(-0.12 + i * 0.06, 0.175), Color(0.2, 0.2, 0.2), 0.0)
+		q.set_meta("on_col", d[2])
+		lamps[d[0]] = q
+	# кнопки-иконки: лебёдка спереди/сзади, фары, гудок
+	var btns := [["winch_front", "winch_front"], ["winch_rear", "winch_rear"], ["lights", "lights"], ["horn", "horn"]]
 	for i in btns.size():
-		var pos := Vector3(0.12 - i * 0.2, 1.93, 3.28)
-		var b := MU.box(Vector3(0.1, 0.06, 0.04), MU.mat(Color(0.7, 0.15, 0.1) if i < 2 else Color(0.2, 0.4, 0.7), 0.4, 0.6), pos)
-		b.basis = face
-		v.add_child(b)
-		var l := _dash_label(pos + Vector3(0, 0.0, 0.07), face, 12)
-		l.text = T.t(btns[i][1])
-		var a := MU.area_box(Vector3(0.17, 0.14, 0.14), pos, "rv_button", "Btn_" + btns[i][0])
+		var xl := 0.15 - i * 0.1
+		var yl := -0.17
+		var base := MU.box(Vector3(0.085, 0.085, 0.012), MU.mat(Color(0.12, 0.12, 0.14), 0.5), Vector3.ZERO)
+		base.transform = Transform3D(FACE, _panel_pos(xl, yl, 0.005))
+		v.add_child(base)
+		var ic := _quad(v, DashIcons.icon(btns[i][1]), 0.062, _panel_pos(xl, yl, 0.0125), Color(0.85, 0.85, 0.8), 0.0)
+		btn_vis[btns[i][0]] = ic
+		var pos := _panel_pos(xl, yl, 0.0)
+		var a := MU.area_box(Vector3(0.13, 0.13, 0.14), pos, "rv_button", "Btn_" + btns[i][0])
 		a.set_meta("action", btns[i][0])
 		add_child(a)
+	# рычаг КПП между креслами: пластина с Н-образной кулисой и стальной рычаг с шаром
+	v.add_child(MU.box(Vector3(0.34, 0.3, 0.7), Color(0.14, 0.14, 0.15), Vector3(0.0, 1.25, 2.52)))
+	var plate := MeshInstance3D.new()
+	var pq := QuadMesh.new()
+	pq.size = Vector2(0.26, 0.26)
+	plate.mesh = pq
+	var pm := StandardMaterial3D.new()
+	pm.albedo_texture = DashIcons.shift_plate()
+	pm.roughness = 0.6
+	plate.material_override = pm
+	plate.transform = Transform3D(Basis(Vector3(1, 0, 0), -PI * 0.5), Vector3(0.0, 1.402, 2.52))
+	v.add_child(plate)
+	lever = Node3D.new()
+	lever.position = Vector3(0.0, 1.41, 2.52)
+	v.add_child(lever)
+	lever.add_child(MU.cyl(0.014, 0.014, 0.4, MU.mat(Color(0.7, 0.7, 0.72), 0.3, 0.0, 0.9), Vector3(0, 0.2, 0), Vector3.ZERO, 8))
+	lever.add_child(MU.sphere(0.035, MU.mat(Color(0.08, 0.08, 0.08), 0.4), Vector3(0, 0.42, 0)))
+	lever.add_child(MU.cyl(0.03, 0.05, 0.06, Color(0.05, 0.05, 0.05), Vector3(0, 0.03, 0), Vector3.ZERO, 8))
+	var la := MU.area_box(Vector3(0.22, 0.3, 0.22), Vector3(0.0, 1.78, 2.52), "rv_lever", "St_lever")
+	add_child(la)
 
 
-func _dash_label(pos: Vector3, b: Basis, size: int) -> Label3D:
-	var l := Label3D.new()
-	l.transform = Transform3D(b, pos)
-	l.font_size = size
-	l.pixel_size = 0.0015
-	l.outline_size = 4
-	l.modulate = Color(0.6, 1.0, 0.7)
-	l.double_sided = false
-	get_node("Vis").add_child(l)
-	return l
+## Положение рычага (x: -1 лево … +1 право от водителя, y: +1 вперёд, -1 назад) для передачи.
+## Передачи: индексы 0=R, 1=N, 2..6 = 1..5.
+static func gear_to_lever(g: int) -> Vector2:
+	match g:
+		0: return Vector2(1, -1)
+		2: return Vector2(-1, 1)
+		3: return Vector2(-1, -1)
+		4: return Vector2(0, 1)
+		5: return Vector2(0, -1)
+		6: return Vector2(1, 1)
+	return Vector2.ZERO
+
+
+static func lever_to_gear(l: Vector2) -> int:
+	if absf(l.y) < 0.8:
+		return 1
+	var col := 1 if l.x > 0.5 else (-1 if l.x < -0.5 else 0)
+	if absf(l.x - float(col)) > 0.35:
+		return 1
+	var up := l.y > 0.0
+	match col:
+		-1: return 2 if up else 3
+		0: return 4 if up else 5
+		1: return 6 if up else 0
+	return 1
+
+
+## Ограничить положение рычага рисунком буквы «Н»: между рядами — только в нейтрали.
+static func constrain_lever(l: Vector2) -> Vector2:
+	var r := Vector2(clampf(l.x, -1.0, 1.0), clampf(l.y, -1.0, 1.0))
+	if absf(r.y) > 0.22:
+		var col := roundf(r.x)
+		r.x = clampf(r.x, col - 0.12, col + 0.12)
+	return r
+
+
+## Мировая позиция шара рычага (для наведения взгляда).
+func lever_world() -> Vector3:
+	return global_transform * Vector3(0.0, 1.8, 2.52)
 
 
 ## Боковые зеркала: SubViewport + камера, картинка отражается по горизонтали.
 func _build_mirrors() -> void:
 	for e in [-1, 1]:
 		var arm := Node3D.new()
-		arm.position = Vector3(e * 1.38, 2.25, 3.25)
+		arm.position = Vector3(e * 1.38, 2.35, 3.25)
 		add_child(arm)
 		arm.add_child(MU.box(Vector3(0.3, 0.04, 0.04), Color(0.1, 0.1, 0.1), Vector3(-e * 0.12, -0.12, 0)))
 		arm.add_child(MU.box(Vector3(0.22, 0.32, 0.04), Color(0.1, 0.1, 0.1), Vector3(0, 0, -0.02)))
@@ -453,8 +578,9 @@ func gear_name() -> String:
 	return GEAR_NAMES[gear]
 
 
-func shift(d: int) -> void:
-	var ng := clampi(gear + d, 0, GEARS.size() - 1)
+## Передачу включает водитель, двигая рычаг мышью (см. Player). Хост принимает индекс 0..6.
+func set_gear(g: int) -> void:
+	var ng := clampi(g, 0, GEARS.size() - 1)
 	if ng != gear:
 		gear = ng
 		world.sfx_all("click", global_position, 0.0, 0.6)
@@ -688,6 +814,23 @@ func _server_physics(delta: float) -> void:
 		flip_upright()
 
 
+func _set_needle(key: String, k: float, sweep: float) -> void:
+	var n: Node3D = needles[key]
+	var target := lerpf(sweep, -sweep, k)
+	var cur: float = n.get_meta("a", sweep)
+	cur = lerpf(cur, target, 0.2)
+	n.set_meta("a", cur)
+	n.basis = FACE * Basis(Vector3(0, 0, 1), cur)
+
+
+func _lamp(key: String, on: bool) -> void:
+	var q: MeshInstance3D = lamps[key]
+	var m := q.material_override as StandardMaterial3D
+	var c: Color = q.get_meta("on_col") if on else Color(0.18, 0.18, 0.18)
+	m.albedo_color = c
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED if on else BaseMaterial3D.SHADING_MODE_PER_PIXEL
+
+
 func _effects(delta: float) -> void:
 	_update_mirrors()
 	var running: bool = seats[0] != 0 and fuel > 0.0 and hp > 0.0
@@ -699,8 +842,7 @@ func _effects(delta: float) -> void:
 		engine_snd.pitch_scale = lerpf(engine_snd.pitch_scale, 0.5 + rpm / MAX_RPM * 1.3 + throttle_vis * 0.1, 0.1)
 	else:
 		engine_snd.volume_db = lerpf(engine_snd.volume_db, -60.0, 0.05)
-	var winching: bool = winch_on[0] or winch_on[1]
-	winch_snd.volume_db = lerpf(winch_snd.volume_db, -8.0 if winching else -60.0, 0.1)
+	winch_snd.volume_db = lerpf(winch_snd.volume_db, -8.0 if (winch_on[0] or winch_on[1]) else -60.0, 0.1)
 	for l in lights:
 		(l as SpotLight3D).visible = lights_on
 	cabin_light.visible = world != null and not world.is_day()
@@ -710,17 +852,25 @@ func _effects(delta: float) -> void:
 			(w as Node3D).rotation.x = _wheel_rot
 	# руль и приборы
 	steering_wheel.rotation.z = steer_vis * 3.0
-	rpm_needle.rotation.z = lerpf(2.3, -2.3, clampf(rpm / 5000.0, 0.0, 1.0))
-	dash_speed.text = "%d" % int(spd * 3.6) + "\n" + T.t("dash_kmh") + "  [" + gear_name() + "]"
-	dash_info.text = T.t("dash_info", [int(fuel), int(max_fuel), int(hp)])
-	var warn := ""
-	if fuel < max_fuel * 0.15:
-		warn += T.t("dash_low_fuel") + " "
-	if hp < 30.0:
-		warn += T.t("dash_engine") + " "
-	if winching:
-		warn += T.t("dash_winch")
-	dash_warn.text = warn
+	var sweep := 2.36
+	_set_needle("speed", clampf(spd * 3.6 / 120.0, 0.0, 1.0), sweep)
+	_set_needle("rpm", clampf(rpm / 5000.0, 0.0, 1.0), sweep)
+	_set_needle("fuel", clampf(fuel / maxf(max_fuel, 1.0), 0.0, 1.0), sweep)
+	_set_needle("engine", clampf(hp / 100.0, 0.0, 1.0), sweep)
+	var winching: bool = winch_on[0] or winch_on[1]
+	_lamp("fuel", fuel < max_fuel * 0.15 and fmod(Time.get_ticks_msec() * 0.004, 2.0) < 1.4)
+	_lamp("engine", hp < 30.0)
+	_lamp("winch", winching)
+	_lamp("lights", lights_on)
+	_lamp("brake", seats[0] != 0 and in_b > 0.5)
+	for k in ["winch_front", "winch_rear"]:
+		var i := 0 if k == "winch_front" else 1
+		(btn_vis[k] as MeshInstance3D).material_override.albedo_color = Color(0.4, 1.0, 1.0) if winch_on[i] else (Color(1.0, 0.9, 0.5) if winch_state[i] == 2 else Color(0.85, 0.85, 0.8))
+	(btn_vis["lights"] as MeshInstance3D).material_override.albedo_color = Color(0.5, 1.0, 0.5) if lights_on else Color(0.85, 0.85, 0.8)
+	# рычаг КПП: пока его не держат, стоит там, где включена передача
+	if not lever_hold:
+		lever_pos = lever_pos.lerp(gear_to_lever(gear), clampf(delta * 12.0, 0.0, 1.0))
+	lever.basis = Basis(Vector3(0, 0, 1), lever_pos.x * 0.22) * Basis(Vector3(1, 0, 0), lever_pos.y * 0.22)
 	# тросы
 	for i in 2:
 		var c: MeshInstance3D = cables[i]

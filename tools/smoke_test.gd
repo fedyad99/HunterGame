@@ -58,7 +58,7 @@ func _process(_d: float) -> bool:
 		print("carcasses=", carc, " hp=", p.hp if p else -1.0)
 		p.start_ragdoll(Vector3(0, 5, 3), 1.0)
 	if frames == 241 or frames == 260:
-		print("bullets=", world._bullets.size(), " hit_lbl=", world.hud.hit_lbl.text)
+		print("bullets=", world._bullets.size(), " hit_t=", world.hud._hit_t)
 	if frames >= 1100 and Time.get_ticks_msec() > 45000:
 		print("ragdoll=", p.ragdoll, " pos=", p.global_position)
 		print("SMOKE OK")

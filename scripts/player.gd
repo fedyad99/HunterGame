@@ -36,6 +36,10 @@ var dead := false
 var light_on := false
 var bleeding_vis := false
 var aim_vis := false
+var watch_view := false
+var lever_grab := false
+var watch_t := 0.0
+var watch_lbl: Label3D
 var ride := false
 var ride_xf := Transform3D()
 
@@ -102,7 +106,6 @@ var target_node: Node = null
 var target_kind := ""
 var _needs_t := 0.0
 var _rv_input_t := 0.0
-var chase_cam := false
 var first_person := false
 var anchor_point := Vector3.ZERO
 var _rv_prev := Transform3D()
@@ -131,7 +134,7 @@ func setup(data: Dictionary) -> void:
 	platform_wall_layers = 0
 	_build()
 	add_child(MU.make_sync(["sync_xform", "aim_pitch", "ragdoll", "jacket", "raincoat", "wet_vis",
-		"emote", "weapon_vis", "holding_big", "dead", "light_on", "bleeding_vis", "aim_vis", "ride", "ride_xf"], 0.033))
+		"emote", "weapon_vis", "holding_big", "dead", "light_on", "bleeding_vis", "aim_vis", "ride", "ride_xf", "watch_view"], 0.033))
 	set_multiplayer_authority(peer_id)
 
 
@@ -195,6 +198,23 @@ func _build() -> void:
 	hand_prop = Node3D.new()
 	hand_prop.scale = Vector3.ONE * 2.2
 	cm.bone_attach("Fist.R").add_child(hand_prop)
+	# наручные часы на левом запястье
+	var wa := cm.bone_attach("Fist.L")
+	var wd := MU.cyl(0.16, 0.16, 0.05, Color(0.75, 0.75, 0.78), Vector3(-0.17, 0.12, 0), Vector3(0, 0, 90), 16)
+	wd.material_override = MU.mat(Color(0.75, 0.75, 0.78), 0.3, 0.0, 0.8)
+	wa.add_child(wd)
+	wa.add_child(MU.cyl(0.13, 0.13, 0.055, Color(0.06, 0.07, 0.09), Vector3(-0.172, 0.12, 0), Vector3(0, 0, 90), 16))
+	wa.add_child(MU.cyl(0.115, 0.115, 0.22, Color(0.15, 0.1, 0.07), Vector3(0, 0.12, 0), Vector3.ZERO, 12))
+	watch_lbl = Label3D.new()
+	watch_lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	watch_lbl.no_depth_test = true
+	watch_lbl.font_size = 48
+	watch_lbl.pixel_size = 0.0016
+	watch_lbl.outline_size = 6
+	watch_lbl.modulate = Color(0.6, 1.0, 0.7)
+	watch_lbl.position = Vector3(-0.27, 0.12, 0)
+	watch_lbl.visible = false
+	wa.add_child(watch_lbl)
 	smoke_fx = _make_fx(Color(0.8, 0.8, 0.8, 0.35), 0.05, Vector3(0, 0.6, 0), 2.0)
 	smoke_fx.position = Vector3(0, -0.05, -0.2)
 	head.add_child(smoke_fx)
@@ -311,6 +331,20 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if world.hud.menu_open():
 		return
+	# рычаг КПП: зажать ЛКМ на рычаге и вести мышью по Н-образной кулисе
+	if seated == 0 and world.rv and event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed and _lever_aimed():
+			lever_grab = true
+			world.rv.lever_hold = true
+			Sfx.play_ui("click", -12)
+			get_viewport().set_input_as_handled()
+			return
+		elif not event.pressed and lever_grab:
+			_lever_release()
+			return
+	if lever_grab and event is InputEventMouseMotion:
+		_lever_drag(event.relative)
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var sens := MOUSE_SENS * Settings.mouse_sens * (0.45 if aiming else 1.0)
 		var dy: float = event.relative.y * (-1.0 if Settings.invert_y else 1.0)
@@ -338,16 +372,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cycle_ammo_type()
 	elif event.is_action_pressed("horn") and seated == 0:
 		world.rpc_id(1, "req_button", "horn")
-	elif event.is_action_pressed("gear_up") and seated == 0:
-		world.rpc_id(1, "req_gear", 1)
-	elif event.is_action_pressed("gear_down") and seated == 0:
-		world.rpc_id(1, "req_gear", -1)
+	elif event.is_action_pressed("watch") and not ragdoll:
+		watch_view = not watch_view
+		watch_t = 5.0
+		Sfx.play_ui("click", -10)
 	elif event.is_action_pressed("winch_front") and seated == 0:
 		world.rpc_id(1, "req_button", "winch_front")
 	elif event.is_action_pressed("winch_rear") and seated == 0:
 		world.rpc_id(1, "req_button", "winch_rear")
-	elif event.is_action_pressed("camera_toggle"):
-		chase_cam = not chase_cam
 	elif event.is_action_pressed("toilet") and seated < 0 and not ragdoll:
 		world.hud.open_toilet(self)
 	elif event.is_action_pressed("weapon_next"):
@@ -401,6 +433,10 @@ func _owner_physics(delta: float) -> void:
 	seated = _seat_index()
 	holding_big = world.get_held_item(peer_id) != null
 	shoot_cd = maxf(shoot_cd - delta, 0.0)
+	if watch_view:
+		watch_t -= delta
+		if watch_t <= 0.0 or seated >= 0 or dead:
+			watch_view = false
 	face_cam_t = maxf(face_cam_t - delta, 0.0)
 	if reload_t > 0.0:
 		reload_t -= delta
@@ -425,6 +461,7 @@ func _owner_physics(delta: float) -> void:
 		return
 	if was_seated >= 0:
 		_leave_seat_place()
+		_lever_release()
 		was_seated = -1
 	shape.disabled = false
 	_move(delta)
@@ -596,7 +633,7 @@ func _check_rv_hit() -> void:
 	if v.length() < 5.0:
 		return
 	var local: Vector3 = rv.global_transform.affine_inverse() * (global_position + Vector3.UP * 0.9)
-	if absf(local.x) < 1.7 and absf(local.z) < 4.3 and local.y > -0.5 and local.y < 3.4:
+	if absf(local.x) < 1.7 and local.z > RV.REAR_Z - 0.3 and local.z < 4.6 and local.y > -0.5 and local.y < 4.2:
 		hp -= v.length() * 1.2
 		bleed += 0.3
 		start_ragdoll(v * 1.1 + Vector3.UP * 6.0, 3.5)
@@ -625,6 +662,34 @@ func _seated_update(delta: float) -> void:
 		world.rpc_id(1, "rv_input", t, s, b)
 
 
+func _lever_aimed() -> bool:
+	var rv: RV = world.rv
+	if rv == null or cam == null:
+		return false
+	var to := rv.lever_world() - cam.global_position
+	if to.length() > 2.2:
+		return false
+	return (-cam.global_basis.z).angle_to(to) < 0.22
+
+
+func _lever_drag(rel: Vector2) -> void:
+	var rv: RV = world.rv
+	if rv == null:
+		return
+	var k := 0.006 * Settings.mouse_sens
+	var l := RV.constrain_lever(rv.lever_pos + Vector2(rel.x * k, -rel.y * k))
+	rv.lever_pos = l
+	var g := RV.lever_to_gear(l)
+	if g != rv.gear:
+		world.rpc_id(1, "req_gear", g)
+
+
+func _lever_release() -> void:
+	lever_grab = false
+	if world.rv:
+		world.rv.lever_hold = false
+
+
 func _leave_seat_place() -> void:
 	var rv: RV = world.rv
 	if rv == null:
@@ -650,17 +715,18 @@ func _update_camera(delta: float) -> void:
 		arm = 4.5
 		side = 0.0
 	elif seated >= 0 and world.rv:
-		if chase_cam:
-			focus = world.rv.global_position + Vector3.UP * 2.8
-			arm = 10.5
-			side = 0.0
-		else:
-			# вид из кабины: глаза на уровне головы, свой силуэт скрыт
-			first_person = true
-			focus = global_position + global_basis * Vector3(0, 1.2, -0.1)
-			arm = 0.0
-			side = 0.0
-			fov = Settings.fov
+		# только вид из кабины: глаза на уровне головы, свой силуэт скрыт
+		first_person = true
+		focus = global_position + global_basis * Vector3(0, 1.2, -0.1)
+		arm = 0.0
+		side = 0.0
+		fov = Settings.fov
+	elif watch_view:
+		# крупный план часов на левой руке
+		focus = cm.fist_world("L") + Vector3.UP * 0.05
+		arm = 0.8
+		side = 0.0
+		fov = 40.0
 	elif ride and ride_xf.origin.y < 3.0:
 		# внутри дома тесно: камера ближе
 		arm = 1.7
@@ -703,6 +769,8 @@ func _update_target() -> void:
 			target_kind = n.get_meta("kind")
 	if target_node == null and TerrainGen.WATER - global_position.y > 0.05 and seated < 0:
 		target_kind = "water"
+	if seated == 0 and (lever_grab or _lever_aimed()):
+		target_kind = "rv_lever"
 	cable_ok = false
 	var rv: RV = world.rv
 	if rv and seated < 0 and rv.cable_holder_of(peer_id) >= 0 and target_kind != "rv_hook":
@@ -743,7 +811,7 @@ func get_prompt() -> String:
 				return T.t("prompt_hook_back") if world.rv.winch_holder[hi] == peer_id else ""
 			return T.t("prompt_hook_detach")
 		"rv_ladder":
-			return T.t("prompt_ladder_up") if global_position.y < world.rv.global_position.y + 2.5 else T.t("prompt_ladder_down")
+			return T.t("prompt_ladder_up") if global_position.y < world.rv.global_position.y + 3.0 else T.t("prompt_ladder_down")
 		"cable_place":
 			return T.t("prompt_cable_attach") if cable_ok else T.t("prompt_cable_far")
 		"cable_hold":
@@ -801,10 +869,10 @@ func _interact() -> void:
 			if cable_ok and rv:
 				world.rpc_id(1, "req_attach", rv.cable_holder_of(peer_id), cable_point)
 		"rv_ladder":
-			if global_position.y < rv.global_position.y + 2.5:
-				global_position = rv.global_transform * Vector3(-0.6, 3.35, -3.0)
+			if global_position.y < rv.global_position.y + 3.0:
+				global_position = rv.global_transform * Vector3(-0.6, RV.ROOF_Y + 0.25, RV.REAR_Z + 0.6)
 			else:
-				var gp: Vector3 = rv.global_transform * Vector3(-0.6, 0.0, -4.5)
+				var gp: Vector3 = rv.global_transform * Vector3(-0.6, 0.0, RV.REAR_Z - 1.1)
 				gp.y = TerrainGen.height_at(gp.x, gp.z) + 0.3
 				global_position = gp
 			velocity = Vector3.ZERO
@@ -1390,7 +1458,15 @@ func _animate(delta: float) -> void:
 	cm.advance(delta)
 	# позы рук поверх анимации
 	var t := emote_t
+	if watch_view and hold_hands == "" and not dead and not ragdoll:
+		hold_hands = "watch"
+	watch_lbl.visible = watch_view and not dead
+	if watch_lbl.visible:
+		var gt: float = world.game_time
+		watch_lbl.text = "%02d:%02d" % [int(gt), int(fmod(gt, 1.0) * 60.0)]
 	match hold_hands:
+		"watch":
+			cm.pose_arm("L", Vector3(-0.3, -0.15, -0.95), Vector3(0.35, 0.8, -0.55))
 		"wheel":
 			cm.pose_arm("R", Vector3(0.15, -0.3, -0.9), Vector3(-0.1, 0.1, -1))
 			cm.pose_arm("L", Vector3(-0.15, -0.3, -0.9), Vector3(0.1, 0.1, -1))

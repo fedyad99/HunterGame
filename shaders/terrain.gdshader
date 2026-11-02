@@ -6,6 +6,13 @@ render_mode cull_disabled;
 uniform sampler2D noise_tex : repeat_enable, filter_linear_mipmap;
 uniform sampler2D noise_nrm : repeat_enable, hint_normal, filter_linear_mipmap;
 
+uniform sampler2D tex_grass : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D tex_dirt : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D tex_rock : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D tex_sand : source_color, repeat_enable, filter_linear_mipmap;
+uniform sampler2D nrm_grass : hint_normal, repeat_enable, filter_linear_mipmap;
+uniform sampler2D nrm_rock : hint_normal, repeat_enable, filter_linear_mipmap;
+
 varying vec3 wpos;
 varying vec4 mask;
 
@@ -14,21 +21,27 @@ void vertex() {
 	mask = COLOR;
 }
 
+// текстура с гашением повторов: два масштаба вперемешку
+vec3 tiled(sampler2D t, vec2 p, float k) {
+	vec3 a = texture(t, p * k).rgb;
+	vec3 b = texture(t, p * k * 0.19 + vec2(0.31, 0.57)).rgb;
+	return mix(a, b, 0.4);
+}
+
 void fragment() {
 	float n1 = texture(noise_tex, wpos.xz * 0.21).r;
 	float n2 = texture(noise_tex, wpos.xz * 0.027).r;
 	float n3 = texture(noise_tex, wpos.xz * 0.0045 + vec2(0.37, 0.11)).r;
-	vec3 grass_a = vec3(0.16, 0.25, 0.08);
-	vec3 grass_b = vec3(0.30, 0.34, 0.12);
-	vec3 dry = vec3(0.47, 0.42, 0.22);
-	vec3 grass = mix(grass_a, grass_b, n2);
-	grass = mix(grass, dry, smoothstep(0.55, 0.8, n3) * 0.55);
-	grass *= 0.78 + n1 * 0.44;
-	vec3 dirt = vec3(0.30, 0.23, 0.15) * (0.8 + n1 * 0.4);
-	grass = mix(grass, dirt, smoothstep(0.62, 0.78, mask.r * 0.4 + n2 * 0.7) * 0.6);
-	vec3 rock = mix(vec3(0.34, 0.33, 0.31), vec3(0.52, 0.50, 0.47), n1) * (0.8 + n2 * 0.35);
-	vec3 sand = vec3(0.60, 0.54, 0.40) * (0.88 + n1 * 0.24);
-	vec3 road = vec3(0.37, 0.31, 0.23) * (0.8 + n1 * 0.35);
+	vec3 tg = tiled(tex_grass, wpos.xz, 0.3);
+	vec3 td = tiled(tex_dirt, wpos.xz, 0.25);
+	vec3 tr = tiled(tex_rock, wpos.xz, 0.2);
+	vec3 ts = tiled(tex_sand, wpos.xz, 0.25);
+	vec3 grass = tg * mix(vec3(0.75, 0.95, 0.7), vec3(1.15, 1.1, 0.8), n2);
+	grass = mix(grass, td * vec3(1.1, 1.05, 0.8), smoothstep(0.55, 0.8, n3) * 0.5);
+	grass = mix(grass, td, smoothstep(0.62, 0.78, mask.r * 0.4 + n2 * 0.7) * 0.5);
+	vec3 rock = tr * (0.9 + n2 * 0.4) * 1.6;
+	vec3 sand = ts * (0.9 + n1 * 0.25) * 1.15;
+	vec3 road = td * vec3(0.85, 0.75, 0.6) * (0.85 + n1 * 0.3);
 	float rockm = smoothstep(0.25, 0.6, mask.g + (n1 - 0.5) * 0.4);
 	float roadm = smoothstep(0.3, 0.7, mask.a + (n1 - 0.5) * 0.35);
 	vec3 c = mix(grass, sand, mask.b);
@@ -36,6 +49,7 @@ void fragment() {
 	c = mix(c, road, roadm);
 	ALBEDO = c;
 	ROUGHNESS = mix(0.95, 0.8, rockm);
-	NORMAL_MAP = texture(noise_nrm, wpos.xz * 0.35).rgb;
-	NORMAL_MAP_DEPTH = mix(0.5, 1.4, rockm);
+	vec3 nm = mix(texture(nrm_grass, wpos.xz * 0.3).rgb, texture(nrm_rock, wpos.xz * 0.2).rgb, rockm);
+	NORMAL_MAP = mix(nm, texture(noise_nrm, wpos.xz * 0.35).rgb, 0.25);
+	NORMAL_MAP_DEPTH = mix(0.8, 1.4, rockm);
 }

@@ -3,21 +3,25 @@ extends CanvasLayer
 ## Интерфейс: шкалы потребностей, подсказки, сообщения, меню.
 
 var world: Node
-var bars := {}
-var money_lbl: Label
-var time_lbl: Label
-var prompt_lbl: Label
-var info_lbl: Label
+var need_icons := {}
+var need_box: HBoxContainer
+var cross_ctl: Control
+var ammo_ctl: Control
+var _cross_target := false
+var _cross_aim := false
+var _hit_col := Color.WHITE
+var _ammo_mag := 0
+var _ammo_res := 0
+var _ammo_reload := false
+var _ammo_big := 0
+var _dead_frac := 0.0
+var dead_ctl: Control
 var icons: ItemIcons
 var _inv_sel := -1
-var cross: Label
-var hit_lbl: Label
-var feed: VBoxContainer
 var menu_panel: PanelContainer
 var menu_box: VBoxContainer
 var menu_title: Label
 var dead_rect: ColorRect
-var dead_lbl: Label
 var drunk_rect: ColorRect
 var _hit_t := 0.0
 var _menu_refresh: Callable
@@ -40,60 +44,31 @@ func _ready() -> void:
 	drunk_rect.material = sm
 	drunk_rect.visible = false
 	root.add_child(drunk_rect)
-	# шкалы
-	var panel := _panel(Vector2(16, 16), Vector2(300, 0))
-	root.add_child(panel)
-	var vb := VBoxContainer.new()
-	panel.add_child(vb)
-	for k in ["hp", "hunger", "thirst", "bladder", "bowels", "warmth", "wetness"]:
-		vb.add_child(_bar(k))
-	# деньги/время
-	money_lbl = _label(26, Color(1.0, 0.9, 0.5))
-	time_lbl = _label(18)
-	var tr := VBoxContainer.new()
-	tr.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	tr.position = Vector2(-330, 16)
-	tr.size = Vector2(310, 80)
-	tr.alignment = BoxContainer.ALIGNMENT_BEGIN
-	money_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	time_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	tr.add_child(money_lbl)
-	tr.add_child(time_lbl)
-	root.add_child(tr)
-	# прицел
-	cross = _label(26)
-	cross.text = "+"
-	cross.set_anchors_preset(Control.PRESET_CENTER)
-	cross.position = Vector2(-8, -18)
-	root.add_child(cross)
-	hit_lbl = _label(22, Color(1.0, 0.35, 0.3))
-	hit_lbl.set_anchors_preset(Control.PRESET_CENTER)
-	hit_lbl.position = Vector2(-200, 24)
-	hit_lbl.size = Vector2(400, 30)
-	hit_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	root.add_child(hit_lbl)
-	# подсказка
-	prompt_lbl = _label(22)
-	prompt_lbl.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-	prompt_lbl.position = Vector2(-400, -150)
-	prompt_lbl.size = Vector2(800, 40)
-	prompt_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	root.add_child(prompt_lbl)
-	# оружие/руки
-	info_lbl = _label(18)
-	info_lbl.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	info_lbl.position = Vector2(-420, -130)
-	info_lbl.size = Vector2(400, 110)
-	info_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	info_lbl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-	root.add_child(info_lbl)
-	# лента сообщений
-	feed = VBoxContainer.new()
-	feed.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	feed.position = Vector2(-350, 16)
-	feed.size = Vector2(700, 200)
-	feed.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(feed)
+	# индикаторы потребностей: только иконки, цвет меняется от зелёного к красному
+	need_box = HBoxContainer.new()
+	need_box.position = Vector2(16, 16)
+	need_box.add_theme_constant_override("separation", 6)
+	need_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(need_box)
+	for k in ["hp", "hunger", "thirst", "bladder", "bowels", "warmth", "wetness", "bleed", "drunk", "poison"]:
+		var ic := HudIcon.new(k)
+		ic.visible = k in ["hp", "hunger", "thirst", "bladder", "bowels", "warmth", "wetness"]
+		need_box.add_child(ic)
+		need_icons[k] = ic
+	# прицел и маркер попадания
+	cross_ctl = Control.new()
+	cross_ctl.set_anchors_preset(Control.PRESET_CENTER)
+	cross_ctl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cross_ctl.draw.connect(_draw_cross)
+	root.add_child(cross_ctl)
+	# патроны: гильзы вместо цифр
+	ammo_ctl = Control.new()
+	ammo_ctl.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	ammo_ctl.position = Vector2(-360, -80)
+	ammo_ctl.size = Vector2(340, 60)
+	ammo_ctl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ammo_ctl.draw.connect(_draw_ammo)
+	root.add_child(ammo_ctl)
 	# смерть
 	dead_rect = ColorRect.new()
 	dead_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -101,12 +76,13 @@ func _ready() -> void:
 	dead_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	dead_rect.visible = false
 	root.add_child(dead_rect)
-	dead_lbl = _label(40, Color(1, 0.8, 0.8))
-	dead_lbl.set_anchors_preset(Control.PRESET_CENTER)
-	dead_lbl.position = Vector2(-400, -60)
-	dead_lbl.size = Vector2(800, 120)
-	dead_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	dead_rect.add_child(dead_lbl)
+	dead_ctl = Control.new()
+	dead_ctl.set_anchors_preset(Control.PRESET_CENTER)
+	dead_ctl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dead_ctl.draw.connect(func():
+		dead_ctl.draw_arc(Vector2.ZERO, 46.0, -PI * 0.5, -PI * 0.5 + TAU * _dead_frac, 48, Color(1, 0.8, 0.8, 0.9), 6.0, true)
+		dead_ctl.draw_circle(Vector2.ZERO, 40.0, Color(0, 0, 0, 0.35)))
+	dead_rect.add_child(dead_ctl)
 	# меню
 	menu_panel = PanelContainer.new()
 	menu_panel.set_anchors_preset(Control.PRESET_CENTER)
@@ -161,97 +137,94 @@ func _label(size: int, c := Color.WHITE) -> Label:
 	return l
 
 
-func _bar(key: String) -> Control:
-	var hb := HBoxContainer.new()
-	var l := _label(15)
-	l.text = T.t("need_" + key)
-	l.custom_minimum_size = Vector2(120, 0)
-	hb.add_child(l)
-	var pb := ProgressBar.new()
-	pb.custom_minimum_size = Vector2(150, 16)
-	pb.show_percentage = false
-	pb.max_value = 100
-	var fill := StyleBoxFlat.new()
-	var colors := {"hp": Color(0.8, 0.15, 0.15), "hunger": Color(0.85, 0.55, 0.15), "thirst": Color(0.2, 0.55, 0.9),
-		"bladder": Color(0.9, 0.85, 0.2), "bowels": Color(0.5, 0.33, 0.15), "warmth": Color(0.95, 0.4, 0.2), "wetness": Color(0.3, 0.75, 0.95)}
-	fill.bg_color = colors[key]
-	fill.set_corner_radius_all(4)
-	var bg := StyleBoxFlat.new()
-	bg.bg_color = Color(0.1, 0.1, 0.1, 0.7)
-	bg.set_corner_radius_all(4)
-	pb.add_theme_stylebox_override("fill", fill)
-	pb.add_theme_stylebox_override("background", bg)
-	pb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hb.add_child(pb)
-	bars[key] = pb
-	return hb
-
-
-func add_msg(text: String) -> void:
-	if feed == null:
-		return
-	var l := _label(19)
-	l.text = text
-	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	feed.add_child(l)
-	while feed.get_child_count() > 6:
-		feed.get_child(0).queue_free()
-		feed.remove_child(feed.get_child(0))
-	var tw := l.create_tween()
-	tw.tween_interval(6.0)
-	tw.tween_property(l, "modulate:a", 0.0, 1.5)
-	tw.tween_callback(l.queue_free)
+## Текстовых сообщений на экране больше нет (только значки и звук).
+func add_msg(_text: String) -> void:
+	pass
 
 
 func show_hit(res: String) -> void:
-	hit_lbl.text = T.t("hit_" + res)
-	hit_lbl.modulate.a = 1.0
-	_hit_t = 2.0
+	_hit_col = Color(1.0, 0.25, 0.2) if res in ["kill", "dead", "lethal"] else Color(1.0, 0.7, 0.2)
+	_hit_t = 0.5
 	Sfx.play_ui("hitmark", -6.0)
 
 
+func _draw_cross() -> void:
+	var c := cross_ctl
+	var col := Color(1, 1, 1, 0.85)
+	if _cross_aim:
+		c.draw_line(Vector2(-14, 0), Vector2(-5, 0), Color(0, 0, 0, 0.6), 4.0)
+		c.draw_line(Vector2(14, 0), Vector2(5, 0), Color(0, 0, 0, 0.6), 4.0)
+		c.draw_line(Vector2(0, -14), Vector2(0, -5), Color(0, 0, 0, 0.6), 4.0)
+		c.draw_line(Vector2(0, 14), Vector2(0, 5), Color(0, 0, 0, 0.6), 4.0)
+		c.draw_line(Vector2(-13, 0), Vector2(-6, 0), col, 2.0)
+		c.draw_line(Vector2(13, 0), Vector2(6, 0), col, 2.0)
+		c.draw_line(Vector2(0, -13), Vector2(0, -6), col, 2.0)
+		c.draw_line(Vector2(0, 13), Vector2(0, 6), col, 2.0)
+	elif _cross_target:
+		c.draw_arc(Vector2.ZERO, 11.0, 0, TAU, 24, Color(1.0, 0.9, 0.4, 0.95), 2.5, true)
+		c.draw_circle(Vector2.ZERO, 2.5, Color(1.0, 0.9, 0.4, 0.95))
+	else:
+		c.draw_circle(Vector2.ZERO, 4.0, Color(0, 0, 0, 0.5))
+		c.draw_circle(Vector2.ZERO, 2.5, col)
+	if _hit_t > 0.0:
+		var a := clampf(_hit_t * 2.0, 0.0, 1.0)
+		var hc := Color(_hit_col.r, _hit_col.g, _hit_col.b, a)
+		for d in [Vector2(1, 1), Vector2(-1, 1)]:
+			c.draw_line(d * 8.0, d * 18.0, hc, 3.0)
+			c.draw_line(-d * 8.0, -d * 18.0, hc, 3.0)
+
+
+func _draw_ammo() -> void:
+	var c := ammo_ctl
+	var x := c.size.x
+	# магазин — крупные гильзы справа налево
+	for i in _ammo_mag:
+		var r := Rect2(Vector2(x - 20 - i * 22, 12), Vector2(14, 36))
+		c.draw_rect(r, Color(0.85, 0.65, 0.2) if not _ammo_reload else Color(0.5, 0.5, 0.5))
+		c.draw_rect(Rect2(r.position, Vector2(14, 11)), Color(0.75, 0.2, 0.15) if _ammo_big == 0 else Color(0.5, 0.5, 0.55))
+	# запас — маленькие гильзы ниже, не больше 16
+	for i in mini(_ammo_res, 16):
+		var r2 := Rect2(Vector2(x - 14 - i * 12, 52), Vector2(7, 14))
+		c.draw_rect(r2, Color(0.8, 0.8, 0.8, 0.6))
+
+
 func update_hud(p: Player) -> void:
-	_hit_t -= get_process_delta_time()
-	hit_lbl.modulate.a = clampf(_hit_t, 0.0, 1.0)
-	var vis := p != null
-	for k in bars:
-		bars[k].get_parent().visible = vis
-	time_lbl.text = T.t("ui_time", [world.day, int(world.game_time), int(fmod(world.game_time, 1.0) * 60.0), int(world.ambient_temp())])
-	if world.raining:
-		time_lbl.text += "  " + T.t("ui_rain")
-	money_lbl.text = T.t("ui_money", [world.money])
+	_hit_t = maxf(_hit_t - get_process_delta_time(), 0.0)
+	need_box.visible = p != null
 	if p == null:
-		prompt_lbl.text = T.t("ui_waiting")
 		return
-	bars.hp.value = p.hp
-	bars.hunger.value = p.hunger
-	bars.thirst.value = p.thirst
-	bars.bladder.value = p.bladder
-	bars.bowels.value = p.bowels
-	bars.warmth.value = p.warmth
-	bars.wetness.value = p.wetness
-	prompt_lbl.text = p.get_prompt()
-	var held: Node = world.get_held_item(p.peer_id)
+	need_icons.hp.set_severity(1.0 - p.hp / 100.0)
+	need_icons.hunger.set_severity(1.0 - p.hunger / 100.0)
+	need_icons.thirst.set_severity(1.0 - p.thirst / 100.0)
+	need_icons.bladder.set_severity(p.bladder / 100.0)
+	need_icons.bowels.set_severity(p.bowels / 100.0)
+	need_icons.warmth.set_severity(1.0 - p.warmth / 100.0)
+	need_icons.wetness.set_severity(p.wetness / 100.0)
+	need_icons.bleed.visible = p.bleed > 0.05
+	need_icons.bleed.set_severity(1.0)
+	need_icons.drunk.visible = p.drunk > 8.0
+	need_icons.drunk.set_severity(p.drunk / 100.0)
+	need_icons.poison.visible = p.poison > 0.05
+	need_icons.poison.set_severity(clampf(p.poison / 50.0, 0.3, 1.0))
+	# прицел
+	cross_ctl.visible = (p.seated < 0 and not p.dead and not p.ragdoll) or (p.seated >= 0 and p.first_person)
+	_cross_aim = p.aiming and p.cur_weapon != ""
+	_cross_target = p.target_kind != "" or world.get_held_item(p.peer_id) != null
+	cross_ctl.queue_redraw()
+	# патроны
 	var w := p.cur_weapon
-	var t: String = p.mag_type[w]
-	var txt := T.t("weapon_" + w) + "\n" + T.t("ui_ammo", [T.t("ammo_" + t), p.mag[w], p.ammo[t]])
-	if p.reload_t > 0.0:
-		txt += "  " + T.t("ui_reloading")
-	txt += "\n" + T.t("ui_inv", [p.inventory.size(), Player.MAX_SLOTS, p.inv_weight(), Player.MAX_WEIGHT])
-	if held:
-		txt += "\n" + T.t("ui_in_hands", [ItemsDB.item_name(held.kind)])
-	if p.bleed > 0.05:
-		txt += "\n" + T.t("ui_bleeding")
-	if p.drunk > 10.0:
-		txt += "\n" + T.t("ui_drunk", [int(p.drunk)])
-	info_lbl.text = txt
-	# в режиме прицеливания — прицел, иначе маленькая точка для взаимодействия
-	cross.visible = p.seated < 0 and not p.dead and not p.ragdoll or (p.seated >= 0 and p.first_person)
-	cross.text = "+" if (p.aiming and p.cur_weapon != "") else "·"
+	ammo_ctl.visible = w != "" and p.seated < 0 and not p.dead
+	if ammo_ctl.visible:
+		var t: String = p.mag_type[w]
+		_ammo_mag = int(p.mag[w])
+		_ammo_res = int(p.ammo[t])
+		_ammo_reload = p.reload_t > 0.0
+		_ammo_big = 0 if t in ["12shot", "12slug", "22lr"] else 1
+		ammo_ctl.queue_redraw()
 	dead_rect.visible = p.dead
 	if p.dead:
-		dead_lbl.text = T.t("ui_dead", [int(ceil(p.dead_t))])
+		_dead_frac = clampf(1.0 - p.dead_t / 12.0, 0.0, 1.0)
+		dead_ctl.queue_redraw()
 	drunk_rect.visible = p.drunk > 5.0
 	if drunk_rect.visible:
 		(drunk_rect.material as ShaderMaterial).set_shader_parameter("amount", p.drunk / 100.0)
@@ -364,6 +337,7 @@ func open_inventory(p: Player) -> void:
 
 
 func _build_inventory(p: Player) -> void:
+	_text(T.t("ui_money", [world.money]), Color(1.0, 0.9, 0.5))
 	var wt := p.inv_weight()
 	var hb := HBoxContainer.new()
 	var wl := _label(16)
