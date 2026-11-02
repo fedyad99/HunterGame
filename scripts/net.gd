@@ -96,5 +96,7 @@ func setup_input() -> void:
 	_key("gear_down", [KEY_CTRL])
 	_key("winch_front", [KEY_F])
 	_key("winch_rear", [KEY_G])
+	_key("toilet", [KEY_P])
+	_key("camera_toggle", [KEY_V])
 	for i in 4:
 		_key("slot_%d" % (i + 1), [KEY_1 + i])

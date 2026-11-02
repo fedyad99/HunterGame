@@ -11,7 +11,7 @@ func _physics_process(_d: float) -> bool:
 	f += 1
 	var rv = w.rv
 	if f == 10:
-		w.req_door()
+		w.req_sit(0)
 	if f > 20:
 		w.rv_input(1.0, 0.0 if f < 900 else 0.4, 0.0)
 	if f in [200, 400, 600]:
@@ -19,7 +19,7 @@ func _physics_process(_d: float) -> bool:
 	if f % 120 == 0:
 		print("f=", f, " gear=", rv.gear_name(), " rpm=", int(rv.rpm), " v=", snappedf(rv.linear_velocity.length() * 3.6, 0.1), "kmh up=", snappedf(rv.global_basis.y.y, 0.01), " hp=", int(rv.hp), " fuel=", snappedf(rv.fuel, 0.1))
 	if f == 1000:
-		print("winch: ", rv.toggle_winch(0))
+		print("winch: ", rv.press_button("lights"))
 	if f == 1300:
 		quit()
 	return false

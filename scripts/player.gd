@@ -9,8 +9,9 @@ const RUN := 7.5
 const JUMP := 5.2
 const GRAV := 14.0
 const MOUSE_SENS := 0.0025
-const MAX_SLOTS := 6
-const MAX_WEIGHT := 25.0
+const MAX_SLOTS := 8
+const MAX_WEIGHT := 30.0
+const STEP_UP := 0.45
 
 const COLORS := [Color(0.55, 0.12, 0.1), Color(0.15, 0.3, 0.55), Color(0.25, 0.4, 0.15), Color(0.5, 0.35, 0.1)]
 const EMOTES := ["wave", "dance", "laugh", "point", "sit", "facepalm", "shrug", "flop"]
@@ -34,6 +35,9 @@ var holding_big := false
 var dead := false
 var light_on := false
 var bleeding_vis := false
+var aim_vis := false
+var ride := false
+var ride_xf := Transform3D()
 
 # --- узлы
 var world: Node
@@ -92,8 +96,7 @@ var was_seated := -1
 var dead_t := 0.0
 var shoot_cd := 0.0
 var reload_t := 0.0
-var inventory: Array = []          # [{kind, q}]
-var weapons: Array = ["toz", "double"]
+var inventory: Array = [{"kind": "weapon_toz", "q": 1.0}, {"kind": "weapon_double", "q": 1.0}]   # [{kind, q}]
 var cur_weapon := "double"
 var ammo := {"22lr": 30, "12shot": 12, "12slug": 6, "308": 0, "338": 0}
 var mag := {"toz": 5, "double": 2, "carbine": 0, "magnum": 0}
@@ -102,6 +105,17 @@ var target_node: Node = null
 var target_kind := ""
 var _needs_t := 0.0
 var _rv_input_t := 0.0
+var chase_cam := false
+var first_person := false
+var anchor_point := Vector3.ZERO
+var _rv_prev := Transform3D()
+var _rv_prev_ok := false
+var _rv_vel := Vector3.ZERO
+var _ride_vis := Transform3D()
+var _was_ride := false
+var cable_ok := false
+var cable_far := false
+var cable_point := Vector3.ZERO
 
 
 func setup(data: Dictionary) -> void:
@@ -114,9 +128,12 @@ func setup(data: Dictionary) -> void:
 	collision_layer = MU.L_PLAYERS
 	collision_mask = MU.L_WORLD | MU.L_RV
 	floor_max_angle = deg_to_rad(50)
+	# дом на колёсах двигает игрока сам (см. _ride_rv), без «платформы» движка
+	platform_floor_layers = 0
+	platform_wall_layers = 0
 	_build()
 	add_child(MU.make_sync(["sync_xform", "aim_pitch", "ragdoll", "jacket", "raincoat", "wet_vis",
-		"emote", "weapon_vis", "holding_big", "dead", "light_on", "bleeding_vis"], 0.033))
+		"emote", "weapon_vis", "holding_big", "dead", "light_on", "bleeding_vis", "aim_vis", "ride", "ride_xf"], 0.033))
 	set_multiplayer_authority(peer_id)
 
 
@@ -266,25 +283,20 @@ func _limb(pivot: Vector3, r: float, length: float, c_top: Color, c_end: Color) 
 	return p
 
 
+var muzzle_node: Marker3D
+
+
 func _build_gun_model(w: String) -> void:
 	for c in gun.get_children():
+		gun.remove_child(c)
 		c.queue_free()
-	var wood := Color(0.36, 0.2, 0.1)
-	var steel := MU.mat(Color(0.12, 0.12, 0.13), 0.35, 0.0, 0.8)
-	var length := {"toz": 0.85, "double": 0.95, "carbine": 1.0, "magnum": 1.2}.get(w, 0.9) as float
-	gun.add_child(MU.box(Vector3(0.06, 0.12, 0.38), wood, Vector3(0, -0.03, 0.12)))
-	if w == "double":
-		gun.add_child(MU.cyl(0.022, 0.022, length * 0.75, steel, Vector3(0.022, 0.02, -length * 0.38), Vector3(90, 0, 0)))
-		gun.add_child(MU.cyl(0.022, 0.022, length * 0.75, steel, Vector3(-0.022, 0.02, -length * 0.38), Vector3(90, 0, 0)))
-	else:
-		var br := 0.016 if w == "toz" else 0.02
-		gun.add_child(MU.cyl(br, br, length * 0.75, steel, Vector3(0, 0.02, -length * 0.38), Vector3(90, 0, 0)))
-	if w == "carbine" or w == "magnum":
-		gun.add_child(MU.cyl(0.03, 0.03, 0.3, steel, Vector3(0, 0.09, -0.1), Vector3(90, 0, 0)))
-	var muzzle := Marker3D.new()
-	muzzle.name = "Muzzle"
-	muzzle.position = Vector3(0, 0.02, -length * 0.76)
-	gun.add_child(muzzle)
+	muzzle_node = null
+	gun.set_meta("w", w)
+	if w == "":
+		return
+	var g := ItemsDB.build_gun(w)
+	gun.add_child(g)
+	muzzle_node = g.get_node("Muzzle") as Marker3D
 
 
 func _ready() -> void:
@@ -297,6 +309,7 @@ func _ready() -> void:
 		world.local_player = self
 		cur_weapon = "double"
 		weapon_vis = cur_weapon
+		_rv_prev_ok = false
 
 
 func _build_camera() -> void:
@@ -312,10 +325,14 @@ func _build_camera() -> void:
 	spring.shape = sph
 	spring.add_excluded_object(get_rid())
 	cam_pivot.add_child(spring)
+	# SpringArm3D сам задаёт положение детей, поэтому боковое смещение «через плечо»
+	# делаем во вложенном узле — иначе перекрестие оказывается прямо на персонаже.
+	var rig := Node3D.new()
+	spring.add_child(rig)
 	cam = Camera3D.new()
 	cam.fov = 72
 	cam.far = 1500
-	spring.add_child(cam)
+	rig.add_child(cam)
 	cam.current = true
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
@@ -352,15 +369,19 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed("ammo_type"):
 		_cycle_ammo_type()
 	elif event.is_action_pressed("horn") and seated == 0:
-		world.rpc_id(1, "req_horn")
+		world.rpc_id(1, "req_button", "horn")
 	elif event.is_action_pressed("gear_up") and seated == 0:
 		world.rpc_id(1, "req_gear", 1)
 	elif event.is_action_pressed("gear_down") and seated == 0:
 		world.rpc_id(1, "req_gear", -1)
-	elif event.is_action_pressed("winch_front") and (seated >= 0 or _near_hook(0)):
-		world.rpc_id(1, "req_winch", 0)
-	elif event.is_action_pressed("winch_rear") and (seated >= 0 or _near_hook(1)):
-		world.rpc_id(1, "req_winch", 1)
+	elif event.is_action_pressed("winch_front") and seated == 0:
+		world.rpc_id(1, "req_button", "winch_front")
+	elif event.is_action_pressed("winch_rear") and seated == 0:
+		world.rpc_id(1, "req_button", "winch_rear")
+	elif event.is_action_pressed("camera_toggle"):
+		chase_cam = not chase_cam
+	elif event.is_action_pressed("toilet") and seated < 0 and not ragdoll:
+		world.hud.open_toilet(self)
 	elif event.is_action_pressed("weapon_next"):
 		_cycle_weapon(1)
 	elif event.is_action_pressed("weapon_prev"):
@@ -369,8 +390,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.is_action_pressed("slot_%d" % (i + 1)):
 			if seated >= 0:
 				world.rpc_id(1, "req_seat", i)
-			elif i < ItemsDB.WEAPON_ORDER.size() and ItemsDB.WEAPON_ORDER[i] in weapons:
-				_select_weapon(ItemsDB.WEAPON_ORDER[i])
+			else:
+				var owned := weapons_owned()
+				if i < owned.size():
+					_select_weapon(owned[i])
 
 
 # ======================================================================= ЦИКЛ
@@ -389,8 +412,14 @@ func _remote_physics(delta: float) -> void:
 	var s := _seat_index()
 	if s >= 0 and world.rv:
 		global_transform = world.rv.get_seat_xform(s)
+	elif ride and world.rv:
+		if not _was_ride:
+			_ride_vis = ride_xf
+		_ride_vis = _ride_vis.interpolate_with(ride_xf, clampf(delta * 14.0, 0.0, 1.0))
+		global_transform = world.rv.global_transform * _ride_vis
 	else:
 		global_transform = global_transform.interpolate_with(sync_xform, clampf(delta * 14.0, 0.0, 1.0))
+	_was_ride = ride and s < 0
 	shape.disabled = true
 
 
@@ -410,6 +439,8 @@ func _owner_physics(delta: float) -> void:
 		if reload_t <= 0.0:
 			_finish_reload()
 	_update_needs(delta)
+	_check_weapon_valid()
+	_ride_rv(delta)
 	if dead:
 		_dead_update(delta)
 		_update_camera(delta)
@@ -429,7 +460,8 @@ func _owner_physics(delta: float) -> void:
 		was_seated = -1
 	shape.disabled = false
 	_move(delta)
-	_check_rv_hit()
+	if not ride:
+		_check_rv_hit()
 	_update_camera(delta)
 	_update_target()
 	if Input.is_action_pressed("shoot") and not world.hud.menu_open() and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -441,7 +473,8 @@ func _move(delta: float) -> void:
 	var input_dir := Vector2.ZERO
 	if not in_menu and not (squat_t > 0.0 and (emote == "pee" or emote == "poo")):
 		input_dir = Input.get_vector("move_left", "move_right", "move_forward", "move_back")
-	aiming = Input.is_action_pressed("aim") and not in_menu and world.get_held_item(peer_id) == null
+	aiming = Input.is_action_pressed("aim") and not in_menu and world.get_held_item(peer_id) == null and cur_weapon != ""
+	aim_vis = aiming or face_cam_t > 0.0
 	var cam_basis := Basis(Vector3.UP, cam_yaw)
 	var dir := cam_basis * Vector3(input_dir.x, 0, input_dir.y)
 	if dir.length() > 1.0:
@@ -481,8 +514,11 @@ func _move(delta: float) -> void:
 			velocity.y = JUMP * (0.75 + 0.25 * _carry_factor())
 			Sfx.play_at("jump", global_position, -12)
 	fall_speed = maxf(fall_speed, -velocity.y) if not is_on_floor() else fall_speed
+	var hv_before := Vector2(velocity.x, velocity.z)
 	move_and_slide()
-	_try_push(delta, dir)
+	_step_up(dir, hv_before)
+	if not ride:
+		_try_push(delta, dir)
 	if is_on_floor():
 		if fall_speed > 12.0:
 			hp -= (fall_speed - 12.0) * 5.0
@@ -504,9 +540,59 @@ func _move(delta: float) -> void:
 		velocity.y = 0
 
 
-func _near_hook(i: int) -> bool:
-	var rv: Node3D = world.rv
-	return rv != null and global_position.distance_to(rv.global_transform * RV.HOOKS[i]) < 3.5
+## Ступеньки: упёрлись в невысокое препятствие — шагаем на него.
+func _step_up(dir: Vector3, hv: Vector2) -> void:
+	if dir.length() < 0.1 or not is_on_wall() or velocity.y > 0.5:
+		return
+	var fw := dir.normalized() * 0.3
+	var up := Vector3.UP * STEP_UP
+	var xf := global_transform
+	if test_move(xf, up):
+		return
+	if test_move(xf.translated(up), fw):
+		return
+	global_position += up + fw
+	var col := move_and_collide(Vector3.DOWN * (STEP_UP + 0.05))
+	if col == null:
+		global_position -= up + fw
+	else:
+		velocity.x = hv.x
+		velocity.z = hv.y
+		velocity.y = 0.0
+
+
+## Дом везёт тех, кто стоит внутри или на крыше, и поворачивает их вместе с собой.
+func _ride_rv(delta: float) -> void:
+	var rv: RV = world.rv
+	if rv == null:
+		ride = false
+		return
+	var now := rv.global_transform
+	var was_ride := ride
+	ride = false
+	if _rv_prev_ok and delta > 0.0:
+		var dyaw := wrapf(now.basis.get_euler().y - _rv_prev.basis.get_euler().y, -PI, PI)
+		var v := (now.origin - _rv_prev.origin) / delta
+		var acc := (v - _rv_vel) / delta
+		_rv_vel = _rv_vel.lerp(v, 0.5)
+		if seated >= 0:
+			cam_yaw += dyaw
+		elif not ragdoll and not dead and rv.contains(global_position + Vector3.UP * 0.5, _rv_prev):
+			ride = true
+			global_position = now * (_rv_prev.affine_inverse() * global_position)
+			rotation.y += dyaw
+			cam_yaw += dyaw
+			acc.y = 0.0
+			if acc.length() > 9.0 and acc.length() < 200.0:
+				velocity -= acc * delta * 0.6
+			if acc.length() > 45.0 and acc.length() < 200.0:
+				start_ragdoll(-acc * 0.08 + Vector3.UP * 2.0, 2.0)
+	if ride:
+		ride_xf = now.affine_inverse() * global_transform
+	elif was_ride:
+		velocity += _rv_vel * Vector3(1, 0, 1)
+	_rv_prev = now
+	_rv_prev_ok = true
 
 
 var _push_t := 0.0
@@ -556,6 +642,7 @@ func _seated_update(delta: float) -> void:
 	var rv: Node3D = world.rv
 	global_transform = rv.get_seat_xform(seated)
 	aim_pitch = cam_pitch
+	aim_vis = false
 	if emote != "":
 		emote = ""
 	if seated == 0:
@@ -568,49 +655,63 @@ func _seated_update(delta: float) -> void:
 			s = Input.get_axis("move_right", "move_left")
 			b = 1.0 if Input.is_action_pressed("jump") else 0.0
 		world.rpc_id(1, "rv_input", t, s, b)
-	elif seated >= 2 and Input.is_action_pressed("shoot") and not world.hud.menu_open():
-		_on_shoot_pressed()   # с крыши можно стрелять
 
 
 func _leave_seat_place() -> void:
-	var rv: Node3D = world.rv
+	var rv: RV = world.rv
 	if rv == null:
 		return
-	var p: Vector3 = rv.get_exit_point(was_seated)
-	p.y = maxf(p.y, TerrainGen.height_at(p.x, p.z) + 0.1)
+	var p: Vector3 = rv.get_stand_point(was_seated)
 	global_position = p
 	rotation = Vector3(0, cam_yaw, 0)
 	velocity = Vector3.ZERO
+	_rv_prev = rv.global_transform
 
 
 func _update_camera(delta: float) -> void:
 	if cam_pivot == null:
 		return
-	var focus := global_position + Vector3.UP * 1.55
-	var arm := 3.4
-	var side := 0.55
+	var focus := global_position + Vector3.UP * 1.65
+	var arm := 3.1
+	var side := 0.85          # камера «через правое плечо», как в экшенах от 3-го лица
 	var fov: float = Settings.fov
+	first_person = false
 	if dead or ragdoll:
 		if flop:
 			focus = flop.global_position + Vector3.UP * 0.6
 		arm = 4.5
 		side = 0.0
 	elif seated >= 0 and world.rv:
-		focus = world.rv.global_position + Vector3.UP * 2.6
-		arm = 10.0
-		side = 0.0
+		if chase_cam:
+			focus = world.rv.global_position + Vector3.UP * 2.8
+			arm = 10.5
+			side = 0.0
+		else:
+			# вид из кабины: глаза на уровне головы, свой силуэт скрыт
+			first_person = true
+			focus = global_position + global_basis * Vector3(0, 1.2, -0.1)
+			arm = 0.0
+			side = 0.0
+			fov = Settings.fov
+	elif ride and ride_xf.origin.y < 3.0:
+		# внутри дома тесно: камера ближе
+		arm = 1.7
+		side = 0.35
 	elif aiming:
-		arm = 1.5
-		side = 0.6
-		fov = float(ItemsDB.WEAPONS[cur_weapon].zoom) * Settings.fov / 72.0
-	cam_pivot.global_position = cam_pivot.global_position.lerp(focus, clampf(delta * 18.0, 0, 1)) if cam_pivot.global_position.distance_to(focus) < 6.0 else focus
+		arm = 1.55
+		side = 0.75
+		focus = global_position + Vector3.UP * 1.6
+		fov = float(ItemsDB.WEAPONS[cur_weapon].zoom) * Settings.fov / 72.0 if cur_weapon != "" else fov
+	cam_pivot.global_position = cam_pivot.global_position.lerp(focus, clampf(delta * 22.0, 0, 1)) if (cam_pivot.global_position.distance_to(focus) < 4.0 and not first_person) else focus
 	var tt := Time.get_ticks_msec() * 0.001
 	var dr := drunk / 100.0
 	cam_pivot.rotation = Vector3(cam_pitch + sin(tt * 0.7) * dr * 0.08, cam_yaw + sin(tt * 0.5) * dr * 0.1, sin(tt * 0.9) * dr * 0.18)
 	fov += sin(tt * 1.7) * dr * 8.0
-	spring.spring_length = lerpf(spring.spring_length, arm, clampf(delta * 8.0, 0, 1))
+	spring.spring_length = arm if first_person else lerpf(spring.spring_length, arm, clampf(delta * 8.0, 0, 1))
 	cam.position.x = lerpf(cam.position.x, side, clampf(delta * 8.0, 0, 1))
 	cam.fov = lerpf(cam.fov, fov, clampf(delta * 10.0, 0, 1))
+	cam.near = 0.05
+	model.visible = not first_person and (spring.get_hit_length() > 0.8 or seated >= 0)
 
 
 # ======================================================================= ВЗАИМОДЕЙСТВИЕ
@@ -634,25 +735,51 @@ func _update_target() -> void:
 			target_kind = n.get_meta("kind")
 	if target_node == null and TerrainGen.WATER - global_position.y > 0.05 and seated < 0:
 		target_kind = "water"
+	cable_ok = false
+	var rv: RV = world.rv
+	if rv and seated < 0 and rv.cable_holder_of(peer_id) >= 0 and target_kind != "rv_hook":
+		var i := rv.cable_holder_of(peer_id)
+		var q2 := PhysicsRayQueryParameters3D.create(start, start + fwd * 6.0, MU.L_WORLD | MU.L_RV, [get_rid()])
+		var r2 := get_world_3d().direct_space_state.intersect_ray(q2)
+		if not r2.is_empty():
+			cable_point = r2.position
+			cable_ok = r2.position.distance_to(rv.hook_pos(i)) <= RV.CABLE_LEN
+			cable_far = not cable_ok
+		target_kind = "cable_place" if not r2.is_empty() else "cable_hold"
 
 
 func get_prompt() -> String:
 	if dead:
 		return ""
-	if seated >= 0:
-		return T.t("prompt_seated")
 	var held: Node = world.get_held_item(peer_id)
+	if seated >= 0:
+		if target_kind == "rv_button":
+			return T.t("prompt_button", [T.t("btn_" + str(target_node.get_meta("action")))])
+		return T.t("prompt_seated_fp")
 	match target_kind:
 		"item":
 			return T.t("prompt_take", [ItemsDB.item_name(target_node.kind)])
-		"rv_door":
-			if world.rv and world.rv.is_flipped():
-				return T.t("prompt_flip")
-			return T.t("prompt_enter_rv")
-		"rv_toilet":
-			return T.t("prompt_toilet")
-		"bush":
-			return T.t("prompt_bush") if bladder > 15.0 or bowels > 15.0 else ""
+		"rv_seat":
+			var si := int(target_node.get_meta("seat"))
+			if world.rv and world.rv.seats[si] != 0 and world.rv.seats[si] != peer_id:
+				return T.t("prompt_seat_taken")
+			return T.t("prompt_sit_driver") if si == 0 else T.t("prompt_sit")
+		"rv_button":
+			return T.t("prompt_button", [T.t("btn_" + str(target_node.get_meta("action")))])
+		"rv_hook":
+			var hi := int(target_node.get_meta("hook"))
+			var st: int = world.rv.winch_state[hi]
+			if st == 0:
+				return T.t("prompt_hook_take")
+			if st == 1:
+				return T.t("prompt_hook_back") if world.rv.winch_holder[hi] == peer_id else ""
+			return T.t("prompt_hook_detach")
+		"rv_ladder":
+			return T.t("prompt_ladder_up") if global_position.y < world.rv.global_position.y + 2.5 else T.t("prompt_ladder_down")
+		"cable_place":
+			return T.t("prompt_cable_attach") if cable_ok else T.t("prompt_cable_far")
+		"cable_hold":
+			return T.t("prompt_holding_cable")
 		"rv_stove", "campfire":
 			if held and held.kind == "firewood":
 				return T.t("prompt_add_wood")
@@ -679,8 +806,12 @@ func get_prompt() -> String:
 
 
 func _interact() -> void:
+	var rv: RV = world.rv
 	if seated >= 0:
-		world.rpc_id(1, "req_exit")
+		if target_kind == "rv_button":
+			world.rpc_id(1, "req_button", str(target_node.get_meta("action")))
+		else:
+			world.rpc_id(1, "req_exit")
 		return
 	match target_kind:
 		"item":
@@ -692,17 +823,27 @@ func _interact() -> void:
 				if not big:
 					world.hud.add_msg(T.t("msg_inv_full"))
 				world.rpc_id(1, "req_grab", target_node.name)
-		"rv_toilet":
-			_use_toilet(true)
-		"bush":
-			if bladder > 15.0 or bowels > 15.0:
-				_use_toilet(false)
+		"rv_seat":
+			world.rpc_id(1, "req_sit", int(target_node.get_meta("seat")))
+		"rv_button":
+			world.rpc_id(1, "req_button", str(target_node.get_meta("action")))
+		"rv_hook":
+			world.rpc_id(1, "req_hook", int(target_node.get_meta("hook")))
+		"cable_place":
+			if cable_ok and rv:
+				world.rpc_id(1, "req_attach", rv.cable_holder_of(peer_id), cable_point)
+		"rv_ladder":
+			if global_position.y < rv.global_position.y + 2.5:
+				global_position = rv.global_transform * Vector3(-0.6, 3.35, -3.0)
+			else:
+				var gp: Vector3 = rv.global_transform * Vector3(-0.6, 0.0, -4.5)
+				gp.y = TerrainGen.height_at(gp.x, gp.z) + 0.3
+				global_position = gp
+			velocity = Vector3.ZERO
 		"rv_wardrobe":
 			world.hud.open_wardrobe(self)
 		"shop":
 			world.hud.open_shop(self, int(target_node.get_meta("shop_idx")))
-		"rv_door":
-			world.rpc_id(1, "req_door")
 		"water":
 			_drink_lake()
 		"rv_stove", "campfire":
@@ -714,18 +855,14 @@ func _interact() -> void:
 		"rv_engine":
 			if inv_remove("repair_kit"):
 				world.rpc_id(1, "req_station", target_node.get_path(), "repair_kit")
-		"":
+		"", "cable_hold":
 			pass
 		_:
 			world.rpc_id(1, "req_station", target_node.get_path(), "")
 
 
-func _use_toilet(in_rv: bool) -> void:
-	world.hud.open_toilet(self, in_rv)
-
-
 ## number_two = false — по-маленькому (стоя), true — по-большому (присев).
-func do_toilet(number_two: bool, in_rv: bool) -> void:
+func do_toilet(number_two: bool) -> void:
 	if emote in ACTION_EMOTES:
 		return
 	if number_two:
@@ -735,8 +872,7 @@ func do_toilet(number_two: bool, in_rv: bool) -> void:
 		bowels = 0.0
 		_do_action("poo")
 		world.sfx_all("strain", global_position, -4.0, randf_range(0.9, 1.1))
-		if not in_rv:
-			world.rpc_id(1, "req_poo_pile", global_position - global_basis.z * -0.3)
+		world.rpc_id(1, "req_poo_pile", global_position - global_basis.z * -0.3)
 	else:
 		if bladder < 10.0:
 			world.hud.add_msg(T.t("msg_no_need"))
@@ -744,9 +880,7 @@ func do_toilet(number_two: bool, in_rv: bool) -> void:
 		bladder = 0.0
 		_do_action("pee")
 		world.sfx_all("pee", global_position, -4.0, 1.0)
-	if in_rv:
-		world.sfx_all("flush", global_position, -2.0, 1.0)
-	elif randf() < 0.3:
+	if randf() < 0.3:
 		world.broadcast(T.t("msg_bush", [nick]))
 
 
@@ -833,6 +967,9 @@ func use_slot(i: int) -> void:
 			inventory.remove_at(i)
 			_consume(e.kind)
 			_do_action("vodka" if e.kind == "vodka" else "beer")
+		"equip":
+			_select_weapon(str(def.weapon))
+			world.hud.add_msg(T.t("weapon_" + str(def.weapon)))
 		"bandage":
 			inventory.remove_at(i)
 			bleed = 0.0
@@ -868,6 +1005,23 @@ func _consume(kind: String) -> void:
 
 
 # ======================================================================= ОРУЖИЕ
+func weapons_owned() -> Array:
+	var out: Array = []
+	for w in ItemsDB.WEAPON_ORDER:
+		if inv_has("weapon_" + w):
+			out.append(w)
+	return out
+
+
+## Если выбранное оружие пропало из рюкзака (выбросили, умерли) — убираем из рук.
+func _check_weapon_valid() -> void:
+	var o := weapons_owned()
+	if (cur_weapon != "" and not inv_has("weapon_" + cur_weapon)) or (cur_weapon == "" and not o.is_empty()):
+		cur_weapon = o[0] if not o.is_empty() else ""
+		weapon_vis = cur_weapon
+		reload_t = 0.0
+
+
 func _select_weapon(w: String) -> void:
 	if w == cur_weapon:
 		return
@@ -878,10 +1032,7 @@ func _select_weapon(w: String) -> void:
 
 
 func _cycle_weapon(d: int) -> void:
-	var owned: Array = []
-	for w in ItemsDB.WEAPON_ORDER:
-		if w in weapons:
-			owned.append(w)
+	var owned := weapons_owned()
 	if owned.is_empty():
 		return
 	var i := owned.find(cur_weapon)
@@ -923,6 +1074,8 @@ func _finish_reload() -> void:
 
 func _on_shoot_pressed() -> void:
 	var held: Node = world.get_held_item(peer_id)
+	if cur_weapon == "" and held == null:
+		return
 	if held:
 		if Input.is_action_just_pressed("shoot"):
 			var dir := (-cam.global_basis.z + Vector3.UP * 0.25).normalized()
@@ -945,6 +1098,7 @@ func _on_shoot_pressed() -> void:
 	# повернуться к цели перед выстрелом
 	rotation.y = cam_yaw
 	face_cam_t = 1.0
+	aim_vis = true
 	aim_pitch = cam_pitch
 	_animate(0.0)
 	# точка прицеливания — то, что под перекрестием
@@ -954,7 +1108,7 @@ func _on_shoot_pressed() -> void:
 	q.collide_with_areas = true
 	var r := get_world_3d().direct_space_state.intersect_ray(q)
 	var aim_point: Vector3 = r.position if not r.is_empty() else from + fwd * 600.0
-	var muzzle: Vector3 = (gun.get_node("Muzzle") as Node3D).global_position
+	var muzzle: Vector3 = muzzle_node.global_position if is_instance_valid(muzzle_node) else gun.global_position
 	var dir := (aim_point - muzzle).normalized()
 	world.rpc_id(1, "req_shoot", muzzle, dir, mag_type[cur_weapon], w.snd)
 	# отдача
@@ -992,10 +1146,11 @@ func add_ammo(cal: String, n: int) -> void:
 
 @rpc("any_peer", "call_local", "reliable")
 func give_weapon(w: String) -> void:
-	if is_multiplayer_authority() and not w in weapons:
-		weapons.append(w)
-		_select_weapon(w)
-		_start_reload()
+	if is_multiplayer_authority() and not inv_has("weapon_" + w):
+		inv_add("weapon_" + w, 1.0)
+		if inv_has("weapon_" + w):
+			_select_weapon(w)
+			_start_reload()
 
 
 func start_ragdoll(impulse: Vector3, dur: float) -> void:
@@ -1131,7 +1286,7 @@ func _update_needs(delta: float) -> void:
 	if drunk > 0.0:
 		drunk = maxf(drunk - dt * 0.6, 0.0)
 	# сырость
-	var outdoors := seated < 0 or seated >= 2
+	var outdoors := not (seated >= 0 or (ride and ride_xf.origin.y < 3.0))
 	var in_water := TerrainGen.WATER - global_position.y > 0.4 and seated < 0
 	var heat: float = world.heat_at(global_position)
 	if in_water:
@@ -1208,8 +1363,7 @@ func _animate(delta: float) -> void:
 	raincoat_mi.visible = raincoat
 	(torso_mi.material_override as StandardMaterial3D)
 	torso_mi.material_override = MU.mat(COLORS[color_idx % COLORS.size()] if jacket else Color(0.9, 0.9, 0.85))
-	if gun.get_child_count() > 0 and gun.get_meta("w", "") != weapon_vis:
-		gun.set_meta("w", weapon_vis)
+	if gun.get_meta("w", "x") != weapon_vis:
 		_build_gun_model(weapon_vis)
 	flashlight.visible = light_on and not dead
 	drips.emitting = wet_vis > 45.0 and not dead
@@ -1231,7 +1385,7 @@ func _animate(delta: float) -> void:
 	var hip_y := 0.95
 	var hip_rot := Vector3.ZERO
 	var head_rot := Vector3(clampf(aim_pitch, -0.8, 0.8) * 0.6, 0, 0)
-	var show_gun := not holding_big and seat_i < 2 and emote == ""
+	var show_gun := not holding_big and seat_i < 0 and emote == "" and weapon_vis != ""
 	var aim_pose := false
 	if ragdoll or dead:
 		var t := Time.get_ticks_msec() * 0.001
@@ -1327,16 +1481,19 @@ func _animate(delta: float) -> void:
 			ra = Vector3(1.4, 0, 0.1)
 		elif show_gun:
 			aim_pose = true
-	if aim_pose:
-		var p := clampf(aim_pitch, -0.9, 0.9)
-		ra = Vector3(1.45 + p, 0.0, -0.15)
-		la = Vector3(1.35 + p, 0.0, 0.5)
+	if aim_pose and aim_vis:
+		# приклад в плечо, ствол смотрит туда же, куда камера
+		var p := clampf(aim_pitch, -1.0, 1.0)
+		var sh := Vector3(0.2, 0.6, 0.0)
 		gun.rotation = Vector3(p, 0, 0)
-		gun.position = Vector3(0.12, 0.52, -0.25)
+		gun.position = sh + Basis(Vector3.RIGHT, p) * Vector3(0.0, -0.02, -0.3)
+		ra = Vector3(1.5 + p, 0.0, -0.12)
+		la = Vector3(1.42 + p, 0.0, 0.8)
+		head_rot = Vector3(clampf(aim_pitch, -0.8, 0.8) * 0.5, 0, -0.08)
 	else:
 		gun.rotation = Vector3(0.0, 0.0, 0.9)
 		gun.position = Vector3(0.0, 0.4, 0.2)   # за спиной
-	gun.visible = not ragdoll and not dead and seat_i < 0 or (seat_i >= 2)
+	gun.visible = show_gun and not ragdoll and not dead
 	var s := clampf(delta * 14.0, 0, 1) if delta > 0.0 else 1.0
 	arm_l.rotation = arm_l.rotation.lerp(la, s)
 	arm_r.rotation = arm_r.rotation.lerp(ra, s)

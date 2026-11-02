@@ -8,7 +8,8 @@ var money_lbl: Label
 var time_lbl: Label
 var prompt_lbl: Label
 var info_lbl: Label
-var rv_lbl: Label
+var icons: ItemIcons
+var _inv_sel := -1
 var cross: Label
 var hit_lbl: Label
 var feed: VBoxContainer
@@ -24,6 +25,8 @@ var _menu_refresh: Callable
 
 func _ready() -> void:
 	layer = 5
+	icons = ItemIcons.new()
+	add_child(icons)
 	var root := Control.new()
 	root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -84,12 +87,6 @@ func _ready() -> void:
 	info_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	info_lbl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	root.add_child(info_lbl)
-	rv_lbl = _label(18, Color(0.85, 0.95, 1.0))
-	rv_lbl.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	rv_lbl.position = Vector2(20, -110)
-	rv_lbl.size = Vector2(420, 90)
-	rv_lbl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
-	root.add_child(rv_lbl)
 	# лента сообщений
 	feed = VBoxContainer.new()
 	feed.set_anchors_preset(Control.PRESET_CENTER_TOP)
@@ -249,17 +246,9 @@ func update_hud(p: Player) -> void:
 	if p.drunk > 10.0:
 		txt += "\n" + T.t("ui_drunk", [int(p.drunk)])
 	info_lbl.text = txt
-	cross.visible = held == null and p.seated < 0 or p.seated >= 2
-	var rv: RV = world.rv
-	if rv and (p.seated >= 0 or rv.global_position.distance_to(p.global_position) < 12.0):
-		rv_lbl.text = T.t("ui_rv", [int(rv.fuel), int(rv.max_fuel), int(rv.hp), int(rv.sync_vel.length() * 3.6)])
-		rv_lbl.text += "\n" + T.t("ui_gear", [rv.gear_name(), int(rv.rpm)])
-		if rv.winch_on[0] or rv.winch_on[1]:
-			rv_lbl.text += "  " + T.t("ui_winch")
-		if p.seated >= 0:
-			rv_lbl.text += "\n" + T.t("ui_rv_controls")
-	else:
-		rv_lbl.text = ""
+	# в режиме прицеливания — прицел, иначе маленькая точка для взаимодействия
+	cross.visible = p.seated < 0 and not p.dead and not p.ragdoll or (p.seated >= 0 and p.first_person)
+	cross.text = "+" if (p.aiming and p.cur_weapon != "") else "·"
 	dead_rect.visible = p.dead
 	if p.dead:
 		dead_lbl.text = T.t("ui_dead", [int(ceil(p.dead_t))])
@@ -326,7 +315,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("help"):
 		open_help()
-	elif menu_open() and (event.is_action_pressed("inventory") or event.is_action_pressed("emote_menu")):
+	elif menu_open() and (event.is_action_pressed("inventory") or event.is_action_pressed("emote_menu") or event.is_action_pressed("toilet")):
 		close_menu()
 		get_viewport().set_input_as_handled()
 
@@ -360,38 +349,128 @@ func open_help() -> void:
 	_open(T.t("ui_help"), func(): _text(T.t("help_text")))
 
 
+func _slot_style(c: Color, border: Color) -> StyleBoxFlat:
+	var st := StyleBoxFlat.new()
+	st.bg_color = c
+	st.set_corner_radius_all(8)
+	st.border_color = border
+	st.set_border_width_all(2)
+	return st
+
+
 func open_inventory(p: Player) -> void:
-	_open(T.t("ui_inventory"), func():
-		_text(T.t("ui_inv", [p.inventory.size(), Player.MAX_SLOTS, p.inv_weight(), Player.MAX_WEIGHT]))
-		if p.inventory.is_empty():
-			_text(T.t("ui_inv_empty"))
-		for i in p.inventory.size():
+	_inv_sel = -1
+	_open(T.t("ui_inventory"), func(): _build_inventory(p))
+
+
+func _build_inventory(p: Player) -> void:
+	var wt := p.inv_weight()
+	var hb := HBoxContainer.new()
+	var wl := _label(16)
+	wl.text = T.t("ui_weight", [wt, Player.MAX_WEIGHT])
+	hb.add_child(wl)
+	var pb := ProgressBar.new()
+	pb.max_value = Player.MAX_WEIGHT
+	pb.value = wt
+	pb.show_percentage = false
+	pb.custom_minimum_size = Vector2(240, 16)
+	pb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hb.add_child(pb)
+	menu_box.add_child(hb)
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 8)
+	menu_box.add_child(grid)
+	for i in Player.MAX_SLOTS:
+		var slot := Button.new()
+		slot.custom_minimum_size = Vector2(118, 118)
+		slot.clip_contents = true
+		var has := i < p.inventory.size()
+		var sel := i == _inv_sel
+		var base := Color(0.16, 0.18, 0.15, 0.95) if has else Color(0.1, 0.11, 0.1, 0.7)
+		var bord := Color(1.0, 0.85, 0.4) if sel else Color(0.35, 0.33, 0.25)
+		for st_name in ["normal", "hover", "pressed", "focus", "disabled"]:
+			slot.add_theme_stylebox_override(st_name, _slot_style(base.lightened(0.08) if st_name == "hover" else base, bord))
+		if has:
 			var e: Dictionary = p.inventory[i]
+			var tr := TextureRect.new()
+			tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			tr.set_anchors_preset(Control.PRESET_FULL_RECT)
+			tr.offset_left = 8
+			tr.offset_top = 6
+			tr.offset_right = -8
+			tr.offset_bottom = -22
+			tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			slot.add_child(tr)
+			icons.request(e.kind, tr)
+			var cap := _label(12, Color(0.9, 0.9, 0.8))
 			var nm := ItemsDB.item_name(e.kind)
-			if e.kind == "cigarettes":
-				nm += " (%d)" % int(e.q)
-			elif str(e.kind).begins_with("carcass_") and float(e.q) < 1.0:
-				nm += " " + T.t("ui_damaged")
-			var hb := HBoxContainer.new()
-			var l := _label(17)
-			l.text = "%s  [%.1f кг]" % [nm, float(ItemsDB.ITEMS[e.kind].mass)]
-			l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			hb.add_child(l)
+			cap.text = nm
+			cap.clip_text = true
+			cap.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+			cap.offset_top = -22
+			cap.offset_left = 6
+			cap.offset_right = -4
+			slot.add_child(cap)
+			var kg := _label(12, Color(0.8, 0.9, 1.0))
+			kg.text = "%.1f" % float(ItemsDB.ITEMS[e.kind].mass)
+			kg.position = Vector2(6, 2)
+			slot.add_child(kg)
+			if e.kind == "cigarettes" or (str(e.kind).begins_with("carcass_") and float(e.q) < 1.0):
+				var qb := _label(13, Color(1.0, 0.8, 0.4))
+				qb.text = str(int(e.q)) if e.kind == "cigarettes" else "!"
+				qb.position = Vector2(92, 2)
+				slot.add_child(qb)
+			if str(e.kind).begins_with("weapon_") and p.cur_weapon == str(ItemsDB.ITEMS[e.kind].weapon):
+				var eq := _label(13, Color(0.5, 1.0, 0.5))
+				eq.text = "✔"
+				eq.position = Vector2(94, 2)
+				slot.add_child(eq)
 			var idx := i
-			if ItemsDB.ITEMS[e.kind].has("use"):
-				var bu := Button.new()
-				bu.text = T.t("ui_use")
-				bu.pressed.connect(func():
-					p.use_slot(idx)
-					close_menu())
-				hb.add_child(bu)
-			var bd := Button.new()
-			bd.text = T.t("ui_drop")
-			bd.pressed.connect(func():
-				p.drop_slot(idx)
+			slot.pressed.connect(func():
+				Sfx.play_ui("click", -10)
+				_inv_sel = idx
 				_rebuild())
-			hb.add_child(bd)
-			menu_box.add_child(hb))
+		else:
+			slot.disabled = true
+		grid.add_child(slot)
+	# выбранный предмет
+	if _inv_sel >= 0 and _inv_sel < p.inventory.size():
+		var e: Dictionary = p.inventory[_inv_sel]
+		var idx := _inv_sel
+		var name_l := _label(18, Color(1.0, 0.9, 0.6))
+		name_l.text = "%s  —  %.1f кг" % [ItemsDB.item_name(e.kind), float(ItemsDB.ITEMS[e.kind].mass)]
+		menu_box.add_child(name_l)
+		var row := HBoxContainer.new()
+		var def: Dictionary = ItemsDB.ITEMS[e.kind]
+		if def.has("use"):
+			var bu := Button.new()
+			bu.text = T.t("ui_equip") if def.use == "equip" else T.t("ui_use")
+			bu.pressed.connect(func():
+				p.use_slot(idx)
+				if def.use == "equip":
+					_rebuild()
+				else:
+					close_menu())
+			row.add_child(bu)
+		var bd := Button.new()
+		bd.text = T.t("ui_drop")
+		bd.pressed.connect(func():
+			p.drop_slot(idx)
+			_inv_sel = -1
+			_rebuild())
+		row.add_child(bd)
+		menu_box.add_child(row)
+	else:
+		_text(T.t("ui_inv_empty") if p.inventory.is_empty() else T.t("ui_slot_hint"))
+	var am := []
+	for k in p.ammo:
+		if int(p.ammo[k]) > 0:
+			am.append("%s ×%d" % [T.t("ammo_" + k), int(p.ammo[k])])
+	if not am.is_empty():
+		_text(T.t("ui_ammo_list", [", ".join(am)]))
 
 
 func open_emotes(p: Player) -> void:
@@ -416,14 +495,14 @@ func open_wardrobe(p: Player) -> void:
 		_text(T.t("ui_wardrobe_hint", [int(p.wetness)])))
 
 
-func open_toilet(p: Player, in_rv: bool) -> void:
+func open_toilet(p: Player) -> void:
 	_open(T.t("ui_toilet"), func():
 		_btn(T.t("ui_pee", [int(p.bladder)]), func():
 			close_menu()
-			p.do_toilet(false, in_rv))
+			p.do_toilet(false))
 		_btn(T.t("ui_poo", [int(p.bowels)]), func():
 			close_menu()
-			p.do_toilet(true, in_rv)))
+			p.do_toilet(true)))
 
 
 func open_shop(p: Player, shop_idx: int) -> void:
@@ -447,7 +526,7 @@ func open_shop(p: Player, shop_idx: int) -> void:
 			var e: Dictionary = ItemsDB.SHOP[i]
 			var price: int = world.shop_price(i)
 			var label := T.t("shop_" + e.key)
-			if e.type == "weapon" and e.weapon in p.weapons:
+			if e.type == "weapon" and p.inv_has("weapon_" + str(e.weapon)):
 				continue
 			var idx := i
 			if price < 0:

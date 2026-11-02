@@ -27,6 +27,11 @@ const ITEMS := {
 	"vodka": {"mass": 0.8, "price": 4, "size": Vector3(0.09, 0.3, 0.09), "carry": 10.0, "use": "booze"},
 	"poo": {"mass": 0.4, "price": 0, "size": Vector3(0.2, 0.1, 0.2), "carry": 10.0},
 	"firewood": {"mass": 6.0, "price": 4, "size": Vector3(0.7, 0.25, 0.25), "carry": 7.0},
+	# оружие тоже лежит в рюкзаке и занимает ячейку
+	"weapon_toz": {"mass": 2.8, "price": 60, "size": Vector3(0.08, 0.16, 1.0), "carry": 9.0, "use": "equip", "weapon": "toz"},
+	"weapon_double": {"mass": 3.4, "price": 90, "size": Vector3(0.1, 0.16, 1.05), "carry": 9.0, "use": "equip", "weapon": "double"},
+	"weapon_carbine": {"mass": 3.6, "price": 150, "size": Vector3(0.1, 0.2, 1.1), "carry": 9.0, "use": "equip", "weapon": "carbine"},
+	"weapon_magnum": {"mass": 4.8, "price": 380, "size": Vector3(0.1, 0.2, 1.3), "carry": 9.0, "use": "equip", "weapon": "magnum"},
 }
 
 # Еда: hunger, thirst, bladder, warmth, шанс отравления
@@ -184,6 +189,41 @@ static func build_visual(kind: String) -> Node3D:
 		"firewood":
 			for i in 3:
 				v.add_child(MU.cyl(0.07, 0.07, s.x, Color(0.4, 0.27, 0.15), Vector3(0, -0.05 + (i % 2) * 0.1, -0.08 + i * 0.08), Vector3(0, 0, 90), 7))
+		"weapon_toz", "weapon_double", "weapon_carbine", "weapon_magnum":
+			var g := build_gun(str(ITEMS[kind].weapon))
+			g.position.z = 0.3
+			v.add_child(g)
 		_:
 			v.add_child(MU.box(s, Color.MAGENTA))
 	return v
+
+
+## Модель ружья: ствол смотрит в −Z, приклад в +Z, начало координат — у спускового крючка.
+## Внутри есть Marker3D «Muzzle» (дульный срез).
+static func build_gun(w: String) -> Node3D:
+	var g := Node3D.new()
+	g.set_meta("w", w)
+	var wood := Color(0.36, 0.2, 0.1)
+	var steel := MU.mat(Color(0.12, 0.12, 0.13), 0.35, 0.0, 0.8)
+	var length := {"toz": 0.85, "double": 0.95, "carbine": 1.0, "magnum": 1.2}.get(w, 0.9) as float
+	# приклад и шейка
+	g.add_child(MU.box(Vector3(0.05, 0.13, 0.3), wood, Vector3(0, -0.04, 0.2), Vector3(-8, 0, 0)))
+	g.add_child(MU.box(Vector3(0.045, 0.06, 0.14), wood, Vector3(0, -0.01, 0.0)))
+	# ствольная коробка и цевьё
+	g.add_child(MU.box(Vector3(0.05, 0.06, 0.18), steel, Vector3(0, 0.0, -0.12)))
+	g.add_child(MU.box(Vector3(0.055, 0.05, 0.28), wood, Vector3(0, -0.02, -0.34)))
+	g.add_child(MU.box(Vector3(0.01, 0.04, 0.04), steel, Vector3(0, -0.05, -0.03)))
+	if w == "double":
+		for e in [-1, 1]:
+			g.add_child(MU.cyl(0.02, 0.02, length * 0.72, steel, Vector3(e * 0.021, 0.02, -0.2 - length * 0.36), Vector3(90, 0, 0)))
+	else:
+		var br := 0.014 if w == "toz" else 0.018
+		g.add_child(MU.cyl(br, br, length * 0.72, steel, Vector3(0, 0.02, -0.2 - length * 0.36), Vector3(90, 0, 0)))
+	if w == "carbine" or w == "magnum":
+		g.add_child(MU.cyl(0.026, 0.026, 0.3, steel, Vector3(0, 0.08, -0.1), Vector3(90, 0, 0)))
+		g.add_child(MU.cyl(0.034, 0.034, 0.05, steel, Vector3(0, 0.08, -0.26), Vector3(90, 0, 0)))
+	var muzzle := Marker3D.new()
+	muzzle.name = "Muzzle"
+	muzzle.position = Vector3(0, 0.02, -0.2 - length * 0.72)
+	g.add_child(muzzle)
+	return g

@@ -31,7 +31,7 @@ func _process(_d: float) -> bool:
 		world.hud.open_shop(p, 0)
 		world.hud.close_menu()
 		world.req_buy(0, 0)
-		world.req_door()
+		world.req_sit(0)
 	if frames == 120 and p:
 		print("seated=", p.seated, " drunk=", p.drunk, " money=", world.money)
 		world.rv_input(1.0, 0.3, 0.0)

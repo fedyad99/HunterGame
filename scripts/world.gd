@@ -166,7 +166,7 @@ func _register(id: int, nick: String) -> void:
 
 func get_respawn_point() -> Vector3:
 	if rv:
-		var p := rv.get_exit_point(0) + rv.global_basis.x * 0.5
+		var p := rv.global_position - rv.global_basis.x * 3.4 + rv.global_basis.z * 0.8
 		return Vector3(p.x, TerrainGen.height_at(p.x, p.z) + 0.3, p.z)
 	var o: Dictionary = TerrainGen.outposts[0]
 	return Vector3(o.pos.x + 2, o.h + 0.5, o.pos.y + 12)
@@ -563,13 +563,17 @@ func shop_price(idx: int) -> int:
 
 
 # --- дом на колёсах
+func _near_rv(p: Node, dist := 9.0) -> bool:
+	return p != null and rv != null and p.global_position.distance_to(rv.global_position) < dist
+
+
 @rpc("any_peer", "call_local", "reliable")
-func req_door() -> void:
-	if not multiplayer.is_server() or rv == null:
+func req_sit(i: int) -> void:
+	if not multiplayer.is_server() or rv == null or i < 0 or i > 3:
 		return
 	var sid := _sender()
 	var p := get_player(sid)
-	if p == null or p.global_position.distance_to(rv.global_position) > 9.0:
+	if not _near_rv(p):
 		return
 	if rv.is_flipped():
 		rv.flip_upright()
@@ -577,19 +581,19 @@ func req_door() -> void:
 		broadcast(T.t("msg_flipped", [p.nick]))
 		return
 	var s: Array = rv.seats.duplicate()
-	if s.has(sid):
+	if s[i] != 0 and s[i] != sid:
+		tell(sid, T.t("prompt_seat_taken"))
 		return
-	var free := s.find(0)
-	if free < 0:
-		tell(sid, T.t("msg_rv_full"))
-		return
-	s[free] = sid
+	var cur := s.find(sid)
+	if cur >= 0:
+		s[cur] = 0
+	s[i] = sid
 	rv.seats = s
 	var held := get_held_item(sid)
 	if held:
 		held.holder = 0
 		_set_holding(sid, false)
-	sfx_all("door", rv.global_position, -2.0, 1.0)
+	sfx_all("door", rv.global_position, -6.0, 1.2)
 
 
 @rpc("any_peer", "call_local", "reliable")
@@ -602,21 +606,12 @@ func req_exit() -> void:
 	if i >= 0:
 		s[i] = 0
 		rv.seats = s
-		sfx_all("door", rv.global_position, -4.0, 1.1)
+		sfx_all("door", rv.global_position, -8.0, 1.3)
 
 
 @rpc("any_peer", "call_local", "reliable")
 func req_seat(i: int) -> void:
-	if not multiplayer.is_server() or rv == null or i < 0 or i > 3:
-		return
-	var sid := _sender()
-	var s: Array = rv.seats.duplicate()
-	var cur := s.find(sid)
-	if cur < 0 or s[i] != 0:
-		return
-	s[cur] = 0
-	s[i] = sid
-	rv.seats = s
+	req_sit(i)
 
 
 @rpc("any_peer", "call_local", "unreliable_ordered")
@@ -632,16 +627,45 @@ func req_gear(d: int) -> void:
 
 
 @rpc("any_peer", "call_local", "reliable")
-func req_winch(i: int) -> void:
+func req_button(action: String) -> void:
+	if not multiplayer.is_server() or rv == null:
+		return
+	var sid := _sender()
+	if rv.seats.find(sid) < 0 or not action in ["winch_front", "winch_rear", "lights", "horn"]:
+		return
+	var res := rv.press_button(action)
+	if action == "horn":
+		for c in entities.get_children():
+			if c is Animal and c.global_position.distance_to(rv.global_position) < 50.0:
+				c.flee(rv.global_position, 6.0)
+	if res != "":
+		tell(sid, T.t(res))
+
+
+@rpc("any_peer", "call_local", "reliable")
+func req_hook(i: int) -> void:
 	if not multiplayer.is_server() or rv == null or i < 0 or i > 1:
 		return
 	var sid := _sender()
 	var p := get_player(sid)
-	if p == null:
+	if p == null or p.global_position.distance_to(rv.hook_pos(i)) > 3.5:
 		return
-	if rv.seats.find(sid) < 0 and p.global_position.distance_to(rv.global_transform * RV.HOOKS[i]) > 4.0:
+	var res := rv.hook_action(i, sid)
+	if res != "":
+		tell(sid, T.t(res))
+
+
+@rpc("any_peer", "call_local", "reliable")
+func req_attach(i: int, point: Vector3) -> void:
+	if not multiplayer.is_server() or rv == null or i < 0 or i > 1:
 		return
-	tell(sid, T.t("msg_" + rv.toggle_winch(i)))
+	var sid := _sender()
+	var p := get_player(sid)
+	if p == null or p.global_position.distance_to(point) > 8.0:
+		return
+	var res := rv.attach_cable(i, sid, point)
+	if res != "":
+		tell(sid, T.t(res))
 
 
 @rpc("any_peer", "call_local", "unreliable")
@@ -671,7 +695,10 @@ func req_shoot(origin: Vector3, dir: Vector3, ammo_kind: String, snd: String) ->
 	for i in int(a.pellets):
 		var spread := deg_to_rad(float(a.spread))
 		var d := dir.normalized()
-		d = d.rotated(d.cross(Vector3.UP).normalized(), randf_range(-spread, spread))
+		var ax := d.cross(Vector3.UP)
+		if ax.length() < 0.01:
+			ax = Vector3.RIGHT
+		d = d.rotated(ax.normalized(), randf_range(-spread, spread))
 		d = d.rotated(Vector3.UP, randf_range(-spread, spread))
 		_bullets.append({"pos": origin, "vel": d * float(a.speed), "v0": float(a.speed), "ammo": ammo_kind,
 			"pen": float(a.pen), "t": 0.0, "shooter": sid, "hit": []})
@@ -1003,7 +1030,7 @@ func _update_fx(delta: float) -> void:
 	var cp := cam.global_position
 	rain_fx.emitting = raining
 	rain_fx.global_position = cp + Vector3(0, 12, 0)
-	var indoor := local_player != null and local_player.seated >= 0 and local_player.seated < 2
+	var indoor := local_player != null and (local_player.seated >= 0 or (local_player.ride and local_player.ride_xf.origin.y < 3.0))
 	rain_snd.volume_db = lerpf(rain_snd.volume_db, (-8.0 if not indoor else -18.0) if raining else -60.0, clampf(delta, 0, 1))
 	amb_snd.volume_db = lerpf(amb_snd.volume_db, -14.0 if is_day() and not raining else -60.0, clampf(delta, 0, 1))
 	night_snd.volume_db = lerpf(night_snd.volume_db, -12.0 if not is_day() else -60.0, clampf(delta, 0, 1))

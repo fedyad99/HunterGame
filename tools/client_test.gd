@@ -19,7 +19,7 @@ func _process(_d: float) -> bool:
 			if c is Item: n_items += 1
 		print("[client] f=", frames, " players=", w.players.size(), " ents=", w.entities.get_child_count(), " items=", n_items, " me=", w.local_player != null, " money=", w.money)
 		if frames == 300 and w.local_player:
-			w.rpc_id(1, "req_door")
+			w.rpc_id(1, "req_sit", 1)
 			w.local_player.play_emote("wave")
 	if frames == 600:
 		var p = w.local_player
