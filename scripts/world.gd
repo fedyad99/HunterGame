@@ -150,6 +150,9 @@ func _server_start() -> void:
 	for k in ["canned_food", "canned_food", "water_bottle", "water_bottle", "water_bottle", "bandage", "cigarettes", "beer", "firewood"]:
 		spawn_item(k, shelf + Vector3(randf_range(-1.5, 1.5), randf_range(0, 0.5), randf_range(-0.3, 0.3)), Vector3.ZERO, 10.0 if k == "cigarettes" else 1.0)
 	spawn_item("jerrycan", c + Vector3(9.0, 0.5, -7.5))
+	spawn_item("jack", c + Vector3(8.0, 0.5, -8.2))
+	spawn_item("spare_wheel", c + Vector3(10.5, 0.5, -8.0))
+	spawn_item("repair_kit", c + Vector3(8.5, 0.5, -6.6))
 	_register(1, Net.nick, Net.look.to_string_code())
 	hud.add_msg(T.t("msg_hosting", [Net.port]))
 
@@ -454,6 +457,8 @@ func req_station(path: NodePath, inv_kind: String) -> void:
 				held.queue_free()
 				sfx_all("fire_whoosh", st.global_position, 0.0, 1.0)
 				_boost_fire(st)
+				if kind == "rv_stove" and rv:
+					rv.stove_t = minf(rv.stove_t + 240.0, 720.0)
 			elif inv_kind == "meat_raw":
 				_cooking.append({"node": st, "t": 7.0, "burn": 25.0})
 				sfx_all("sizzle", st.global_position, 0.0, 1.0)
@@ -656,14 +661,14 @@ func req_hook(i: int) -> void:
 
 
 @rpc("any_peer", "call_local", "reliable")
-func req_attach(i: int, point: Vector3) -> void:
+func req_attach(i: int, point: Vector3, item_name := "") -> void:
 	if not multiplayer.is_server() or rv == null or i < 0 or i > 1:
 		return
 	var sid := _sender()
 	var p := get_player(sid)
 	if p == null or p.global_position.distance_to(point) > 8.0:
 		return
-	var res := rv.attach_cable(i, sid, point)
+	var res := rv.attach_cable(i, sid, point, item_name)
 	if res != "":
 		tell(sid, T.t(res))
 
@@ -1151,3 +1156,106 @@ func _burst(pos: Vector3, c: Color, n: int, size: float, emit := 0.0) -> void:
 	p.global_position = pos
 	p.emitting = true
 	get_tree().create_timer(1.5).timeout.connect(p.queue_free)
+
+
+# --- длительные работы с домом (удержание E): заправка, ремонт, домкрат, колёса
+@rpc("any_peer", "call_local", "reliable")
+func req_work(kind: String, idx: int, on: bool, extra: Dictionary = {}) -> void:
+	if not multiplayer.is_server() or rv == null:
+		return
+	var sid := _sender()
+	if not on:
+		rv.stop_job(sid)
+		return
+	var p := get_player(sid)
+	if p == null or not kind in ["refuel", "pump", "repair", "unbolt", "mount", "jack_up", "jack_down"]:
+		return
+	if kind != "pump" and not _near_rv(p, 9.0):
+		return
+	rv.start_job(sid, kind, idx, extra)
+
+
+var _pump_acc := 0.0
+
+
+## Колонка: льёт в канистру в руках или в бак дома рядом.
+func pump_tick(pid: int, dt: float, extra: Dictionary) -> bool:
+	var p := get_player(pid)
+	if p == null:
+		return false
+	var held := get_held_item(pid) as Item
+	var liters := 0.0
+	if held != null and held.kind == "jerrycan":
+		liters = minf(5.0 * dt, (1.0 - held.q) * RV.CAN_LITERS)
+		if liters <= 0.01:
+			tell(pid, T.t("msg_can_full") if T.t("msg_can_full") != "msg_can_full" else T.t("msg_tank_full"))
+			return false
+	else:
+		if rv == null or rv.global_position.distance_to(extra.get("pos", rv.global_position)) > 14.0:
+			tell(pid, T.t("msg_bring_rv"))
+			return false
+		liters = minf(6.0 * dt, rv.max_fuel - rv.fuel)
+		if liters <= 0.01:
+			tell(pid, T.t("msg_tank_full"))
+			return false
+	_pump_acc += liters * ItemsDB.FUEL_PRICE
+	var whole := int(_pump_acc)
+	if whole > 0:
+		if money < whole:
+			tell(pid, T.t("msg_no_money"))
+			_pump_acc = 0.0
+			return false
+		money -= whole
+		_pump_acc -= whole
+		_push_state()
+	if held != null and held.kind == "jerrycan":
+		held.q = minf(held.q + liters / RV.CAN_LITERS, 1.0)
+	else:
+		rv.fuel += liters
+	return true
+
+
+# --- склад дома: холодильник, стеллаж, шкафчик
+@rpc("any_peer", "call_local", "reliable")
+func req_store(key: String, op: String, entry: Dictionary, idx: int) -> void:
+	if not multiplayer.is_server() or rv == null:
+		return
+	var sid := _sender()
+	var p := get_player(sid)
+	if not _near_rv(p, 9.0):
+		return
+	if op == "put":
+		if not ItemsDB.ITEMS.has(str(entry.get("kind", ""))) or not rv.store_put(key, {"kind": entry.kind, "q": float(entry.get("q", 1.0)), "age": float(entry.get("age", 0.0))}):
+			tell(sid, T.t("msg_store_full"))
+			p.rpc_id(sid, "recv_store_item", entry)   # вернуть обратно
+		else:
+			sfx_all("click", rv.global_position, -4.0, 0.9)
+	elif op == "take":
+		var e := rv.store_take(key, idx)
+		if not e.is_empty():
+			p.rpc_id(sid, "recv_store_item", e)
+			sfx_all("click", rv.global_position, -4.0, 1.2)
+
+
+# --- багажник на крыше
+@rpc("any_peer", "call_local", "reliable")
+func req_rack() -> void:
+	if not multiplayer.is_server() or rv == null:
+		return
+	var sid := _sender()
+	var p := get_player(sid)
+	var held := get_held_item(sid) as Item
+	if p == null or held == null or not ItemsDB.ITEMS[held.kind].get("big", false) or not _near_rv(p, 9.0):
+		return
+	var pos := rv.rack_free_slot()
+	if pos == Vector3.INF:
+		tell(sid, T.t("msg_rack_full"))
+		return
+	held.holder = 0
+	_set_holding(sid, false)
+	held.global_position = pos
+	held.linear_velocity = rv.linear_velocity
+	held.angular_velocity = Vector3.ZERO
+	held.global_rotation = Vector3(0, rv.global_rotation.y, 0)
+	sfx_all("thud", pos, 0.0, 1.0)
+	tell(sid, T.t("msg_rack_placed"))

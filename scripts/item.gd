@@ -22,6 +22,7 @@ func setup(data: Dictionary) -> void:
 	collision_layer = MU.L_ITEMS
 	collision_mask = MU.L_WORLD | MU.L_ITEMS | MU.L_RV
 	set_meta("kind", "item")
+	add_to_group("items")
 	var cs := CollisionShape3D.new()
 	var bs := BoxShape3D.new()
 	bs.size = def.size

@@ -392,6 +392,11 @@ func _build_inventory(p: Player) -> void:
 			kg.text = "%.1f" % float(ItemsDB.ITEMS[e.kind].mass)
 			kg.position = Vector2(6, 2)
 			slot.add_child(kg)
+			if ItemsDB.freshness(e.kind, float(e.get("age", 0.0))) > 0:
+				var fb := _label(13, Color(1.0, 0.35, 0.25) if ItemsDB.freshness(e.kind, float(e.get("age", 0.0))) == 2 else Color(1.0, 0.8, 0.3))
+				fb.text = "⚠"
+				fb.position = Vector2(2, 2)
+				slot.add_child(fb)
 			if e.kind == "cigarettes" or (str(e.kind).begins_with("carcass_") and float(e.q) < 1.0):
 				var qb := _label(13, Color(1.0, 0.8, 0.4))
 				qb.text = str(int(e.q)) if e.kind == "cigarettes" else "!"
@@ -467,6 +472,53 @@ func open_wardrobe(p: Player) -> void:
 			Sfx.play_ui("zip", -4)
 			_rebuild())
 		_text(T.t("ui_wardrobe_hint", [int(p.wetness)])))
+
+
+func _entry_label(e: Dictionary) -> String:
+	var n: String = ItemsDB.item_name(e.kind)
+	var fr := ItemsDB.freshness(e.kind, float(e.get("age", 0.0)))
+	if fr > 0:
+		n += " (%s)" % T.t("fresh_%d" % fr)
+	return n
+
+
+## Склад дома: холодильник, стеллаж, шкафчик. Содержимое хранит хост (rv.store).
+func open_storage(p: Player, key: String) -> void:
+	var refresh_later := func(): get_tree().create_timer(0.25).timeout.connect(_rebuild)
+	_open(T.t("ui_store_" + key), func():
+		var rv: RV = world.rv
+		var arr: Array = rv.store.get(key, [])
+		_text(T.t("ui_store_inside", [arr.size(), int(RV.STORE_CAP[key])]), Color(1, 0.9, 0.5))
+		if key == "fridge":
+			_text(T.t("ui_store_cold"), Color(0.6, 0.85, 1.0))
+		if arr.is_empty():
+			_text(T.t("ui_store_empty"))
+		for i in arr.size():
+			var e: Dictionary = arr[i]
+			var idx := i
+			_btn("%s: %s" % [T.t("ui_store_take"), _entry_label(e)], func():
+				if not p.can_add(e.kind):
+					add_msg(T.t("msg_inv_full"))
+					return
+				world.rpc_id(1, "req_store", key, "take", {}, idx)
+				refresh_later.call())
+		_text(T.t("ui_store_mine"), Color(1, 0.9, 0.5))
+		var any := false
+		for j in p.inventory.size():
+			var e2: Dictionary = p.inventory[j]
+			if str(e2.kind).begins_with("weapon_"):
+				continue
+			any = true
+			var jj := j
+			_btn("%s: %s" % [T.t("ui_store_put"), _entry_label(e2)], func():
+				if jj >= p.inventory.size():
+					return
+				var ent: Dictionary = p.inventory[jj]
+				p.inventory.remove_at(jj)
+				world.rpc_id(1, "req_store", key, "put", ent.duplicate(), 0)
+				refresh_later.call())
+		if not any:
+			_text(T.t("ui_inv_empty")))
 
 
 func open_toilet(p: Player) -> void:

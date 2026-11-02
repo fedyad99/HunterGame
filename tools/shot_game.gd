@@ -3,10 +3,12 @@ extends SceneTree
 var f := 0
 var mode := "aim"
 var out := "/tmp/game.png"
+var shot_f := 150
 func _initialize() -> void:
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("mode="): mode = a.substr(5)
 		if a.begins_with("out="): out = a.substr(4)
+		if a.begins_with("f="): shot_f = int(a.substr(2))
 	var net = root.get_node("Net")
 	net.is_host = true
 	net.port = 17790
@@ -31,6 +33,13 @@ func _physics_process(_d: float) -> bool:
 				p.global_position = rv.global_transform * Vector3(0, 1.3, -0.5)
 				p.cam_yaw = rv.rotation.y - PI * 0.5
 			"aim":
+				p.global_position = rv.global_position + rv.global_basis.x * -5.0
+				p.cam_yaw = rv.rotation.y - PI * 0.5
+				Input.action_press("aim")
+				p.cam_pitch = -0.1
+			"gun":
+				p.cam_yaw = rv.rotation.y
+			"draw":
 				p.global_position = rv.global_position + rv.global_basis.x * -5.0
 				p.cam_yaw = rv.rotation.y - PI * 0.5
 				Input.action_press("aim")
@@ -70,7 +79,7 @@ func _physics_process(_d: float) -> bool:
 		p.warmth = 55.0
 		p.wetness = 40.0
 		p.hp = 70.0
-	if f == 150:
+	if f == shot_f:
 		var img := root.get_texture().get_image()
 		img.save_png(out)
 		print("saved ", out)

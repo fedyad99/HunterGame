@@ -21,6 +21,9 @@ const ITEMS := {
 	"canned_food": {"mass": 0.6, "price": 3, "size": Vector3(0.16, 0.18, 0.16), "carry": 10.0, "use": "eat"},
 	"jerrycan": {"mass": 18.0, "price": 8, "size": Vector3(0.22, 0.48, 0.38), "carry": 6.0, "use": "fuel", "big": true},
 	"repair_kit": {"mass": 8.0, "price": 15, "size": Vector3(0.5, 0.28, 0.25), "carry": 7.0, "use": "repair"},
+	"spare_wheel": {"mass": 28.0, "price": 30, "size": Vector3(1.0, 0.36, 1.0), "carry": 3.0, "hold": 1.8, "big": true},
+	"wheel_flat": {"mass": 24.0, "price": 2, "size": Vector3(1.0, 0.36, 1.0), "carry": 3.0, "hold": 1.8, "big": true},
+	"jack": {"mass": 7.0, "price": 20, "size": Vector3(0.4, 0.26, 0.26), "carry": 7.0, "use": "tool"},
 	"bandage": {"mass": 0.2, "price": 3, "size": Vector3(0.12, 0.08, 0.12), "carry": 10.0, "use": "bandage"},
 	"cigarettes": {"mass": 0.1, "price": 2, "size": Vector3(0.09, 0.03, 0.06), "carry": 10.0, "use": "smoke"},
 	"beer": {"mass": 0.6, "price": 2, "size": Vector3(0.08, 0.24, 0.08), "carry": 10.0, "use": "booze"},
@@ -33,6 +36,20 @@ const ITEMS := {
 	"weapon_carbine": {"mass": 3.6, "price": 150, "size": Vector3(0.1, 0.2, 1.1), "carry": 9.0, "use": "equip", "weapon": "carbine"},
 	"weapon_magnum": {"mass": 4.8, "price": 380, "size": Vector3(0.1, 0.2, 1.3), "carry": 9.0, "use": "equip", "weapon": "magnum"},
 }
+
+# Скоропортящееся: сколько секунд до порчи (в холодильнике время идёт медленнее)
+const PERISHABLE := {"meat_raw": 420.0, "meat_cooked": 900.0}
+
+
+## 0 — свежее, 1 — несвежее, 2 — тухлое.
+static func freshness(kind: String, age: float) -> int:
+	if not PERISHABLE.has(kind):
+		return 0
+	var lim: float = PERISHABLE[kind]
+	if age >= lim:
+		return 2
+	return 1 if age >= lim * 0.6 else 0
+
 
 # Еда: hunger, thirst, bladder, warmth, шанс отравления
 const FOOD := {
@@ -92,6 +109,8 @@ const SHOP := [
 	{"key": "vodka", "type": "item", "price": 12},
 	{"key": "jerrycan", "type": "item", "price": 25},
 	{"key": "repair_kit", "type": "item", "price": 45},
+	{"key": "jack", "type": "item", "price": 60},
+	{"key": "spare_wheel", "type": "item", "price": 90},
 	{"key": "ammo_22lr", "type": "ammo", "ammo": "22lr", "amount": 20, "price": 10},
 	{"key": "ammo_12shot", "type": "ammo", "ammo": "12shot", "amount": 10, "price": 12},
 	{"key": "ammo_12slug", "type": "ammo", "ammo": "12slug", "amount": 10, "price": 18},
@@ -167,11 +186,27 @@ static func build_visual(kind: String) -> Node3D:
 			v.add_child(MU.cyl(0.075, 0.075, 0.17, MU.mat(Color(0.75, 0.75, 0.78), 0.3, 0.0, 0.8)))
 			v.add_child(MU.cyl(0.077, 0.077, 0.09, Color(0.8, 0.2, 0.1)))
 		"jerrycan":
-			v.add_child(MU.box(s, Color(0.75, 0.1, 0.08)))
-			v.add_child(MU.box(Vector3(0.05, 0.06, 0.2), Color(0.15, 0.15, 0.15), Vector3(0, s.y * 0.55, 0)))
+			var jm := A3.model("metal_jerrycan", s.y)
+			jm.position.y = -s.y * 0.5
+			jm.rotation_degrees.y = 90
+			v.add_child(jm)
 		"repair_kit":
-			v.add_child(MU.box(s, Color(0.85, 0.35, 0.05)))
-			v.add_child(MU.box(Vector3(0.25, 0.05, 0.04), Color(0.1, 0.1, 0.1), Vector3(0, s.y * 0.6, 0)))
+			var km := A3.model("metal_toolbox", s.y * 1.0, -1.0)
+			km.position.y = -s.y * 0.5
+			km.scale = Vector3.ONE * 1.1
+			v.add_child(km)
+		"spare_wheel", "wheel_flat":
+			var tire := MU.cyl(0.5, 0.5, 0.36, A3.tmat("rubber", Color(0.5, 0.5, 0.5), 0.5, 0.9), Vector3.ZERO, Vector3.ZERO, 24)
+			if kind == "wheel_flat":
+				tire.scale = Vector3(1, 0.7, 1)
+			v.add_child(tire)
+			var rm := A3.model("rusted_wheel_rim_01", -1.0, 0.62)
+			rm.rotation_degrees.x = 90
+			rm.position.y = 0.19
+			v.add_child(rm)
+		"jack":
+			v.add_child(MU.cyl(0.07, 0.09, 0.2, MU.mat(Color(0.8, 0.1, 0.05), 0.5, 0.0, 0.4), Vector3(0, -0.03, 0), Vector3.ZERO, 10))
+			v.add_child(MU.cyl(0.03, 0.03, 0.3, MU.mat(Color(0.7, 0.7, 0.72), 0.3, 0.0, 0.9), Vector3(0, 0.05, 0), Vector3(0, 0, 90), 8))
 		"bandage":
 			v.add_child(MU.cyl(0.06, 0.06, 0.08, Color(0.95, 0.95, 0.92)))
 		"cigarettes":

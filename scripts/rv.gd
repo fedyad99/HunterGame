@@ -9,10 +9,17 @@ const FLOOR_Y := 1.05
 const SEATS := [
 	[Vector3(0.55, 1.12, 2.25), PI],          # 0 водитель
 	[Vector3(-0.55, 1.12, 2.25), PI],         # 1 пассажир
-	[Vector3(0.72, 1.12, -1.5), PI / 2.0],    # 2 диван
-	[Vector3(0.72, 1.12, -2.35), PI / 2.0],   # 3 диван
+	[Vector3(0.66, 1.12, -2.75), PI / 2.0],   # 2 диван
+	[Vector3(0.66, 1.12, -3.65), PI / 2.0],   # 3 диван
 ]
-const STAND := [Vector3(0.1, 1.1, 1.6), Vector3(-0.2, 1.1, 1.6), Vector3(0.0, 1.1, -1.5), Vector3(0.0, 1.1, -2.35)]
+const STAND := [Vector3(0.1, 1.1, 1.6), Vector3(-0.2, 1.1, 1.6), Vector3(-0.1, 1.1, -2.75), Vector3(-0.1, 1.1, -3.65)]
+const WHEEL_POS := [Vector3(1.1, 0.55, 2.6), Vector3(-1.1, 0.55, 2.6), Vector3(1.1, 0.55, -4.95), Vector3(-1.1, 0.55, -4.95)]
+const BASE_MASS := 3200.0
+const BASE_COM := Vector3(0, 0.35, -1.2)
+const STORE_CAP := {"fridge": 10, "shelf": 14, "locker": 10}
+const FRIDGE_COLD := 0.12          # во сколько раз медленнее портится еда в холодильнике
+const PUNCTURE_RATE := 1.1e-5      # шанс прокола на тик на (м/с) вне дороги
+const CAN_LITERS := 40.0
 const BASE_FORCE := 5200.0
 const ENGINE_MULT := [1.0, 1.35, 1.75]
 const TANK := [70.0, 110.0, 160.0]
@@ -24,7 +31,7 @@ const FINAL_DRIVE := 8.0
 const WHEEL_R := 0.5
 const IDLE_RPM := 850.0
 const MAX_RPM := 4600.0
-const CABLE_LEN := 30.0
+const CABLE_LEN := 50.0
 const WINCH_FORCE := 28000.0
 const EXT := 3.4                 # на сколько метров салон длиннее прежнего
 const H_UP := 0.4                # и выше
@@ -83,6 +90,28 @@ var lever: Node3D          # рычаг КПП
 var lever_pos := Vector2.ZERO   # текущее положение рычага (-1..1)
 var lever_hold := false         # игрок держит рычаг мышью (положение задаёт он)
 var thermo: Thermometer
+# --- повреждения: двигатель — hp (прибор), кузов, бак, колёса
+var hp_body := 100.0
+var hp_tank := 100.0
+var wheel_hp: Array = [100.0, 100.0, 100.0, 100.0]
+var wheel_state: Array = [0, 0, 0, 0]      # 0 исправно, 1 спущено, 2 снято
+var jack_i := -1                           # какой угол поднят домкратом
+var jack_t := 0.0                          # 0..1 высота подъёма
+var stove_t := 0.0                         # сколько ещё секунд горит печь
+var store := {"fridge": [], "shelf": [], "locker": []}
+var winch_item: Array = ["", ""]           # имя предмета на конце троса (туша), "" — трос на земле/дереве
+var cargo_mass := 0.0
+var shelf_pos := Vector3.ZERO
+var fridge_pos := Vector3.ZERO
+var locker_pos := Vector3.ZERO
+var stove_light: OmniLight3D
+var stove_fx: CPUParticles3D
+var leak: CPUParticles3D
+var jack_node: Node3D
+var wheel_parts: Array = []
+var job := {}                              # текущая «работа» (удерживаемое E): только хост
+var _cargo_t := 0.0
+var _dent_nodes: Array = []
 
 
 func setup(data: Dictionary) -> void:
@@ -90,16 +119,18 @@ func setup(data: Dictionary) -> void:
 	position = data.pos
 	rotation.y = float(data.get("yaw", 0.0))
 	sync_xform = Transform3D(Basis(Vector3.UP, rotation.y), data.pos)
-	mass = 3200.0
+	mass = BASE_MASS
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = Vector3(0, 0.35, -1.2)
+	center_of_mass = BASE_COM
 	angular_damp = 0.6
 	collision_layer = MU.L_RV
 	collision_mask = MU.L_WORLD | MU.L_ITEMS
 	_build()
 	add_child(MU.make_sync(["sync_xform", "sync_vel", "fuel", "max_fuel", "hp", "up_engine", "up_tank",
 		"up_armor", "up_heater", "seats", "throttle_vis", "steer_vis", "gear", "rpm", "lights_on",
-		"winch_state", "winch_holder", "winch_anchor", "winch_on"], 0.033))
+		"winch_state", "winch_holder", "winch_anchor", "winch_on", "hp_body", "hp_tank", "jack_i", "jack_t", "stove_t",
+		"cargo_mass"], 0.033))
+	add_child(MU.make_sync(["wheel_hp", "wheel_state", "store", "winch_item"], 0.1, true, "Sync2"))
 
 
 # ======================================================================= ПОСТРОЕНИЕ
@@ -120,7 +151,7 @@ func _part(v: Node3D, size: Vector3, pos: Vector3, c: Variant, rot := Vector3.ZE
 
 
 ## Стена с окном: низ и верх сплошные, посередине стекло.
-func _wall(v: Node3D, size: Vector3, pos: Vector3, c: Color, glass: Material) -> void:
+func _wall(v: Node3D, size: Vector3, pos: Vector3, c: Variant, glass: Material) -> void:
 	_shape(size, pos)
 	var y0 := pos.y - size.y * 0.5
 	var bottom := 0.95
@@ -132,123 +163,13 @@ func _wall(v: Node3D, size: Vector3, pos: Vector3, c: Color, glass: Material) ->
 
 
 func _build() -> void:
-	var cream := Color(0.9, 0.86, 0.75)
-	var brown := Color(0.45, 0.28, 0.15)
-	var dark := Color(0.2, 0.2, 0.2)
-	var glass := MU.mat(Color(0.35, 0.45, 0.5, 0.3), 0.05, 0.0, 0.3)
-	var cz := -0.1 - EXT * 0.5          # центр удлинённой части по Z
-	var lz := 6.8 + EXT                 # длина кузова
-	var wh := 2.1 + H_UP                # высота стен
-	var wy := 2.1 + H_UP * 0.5          # центр стен по Y
 	var v := Node3D.new()
 	v.name = "Vis"
 	add_child(v)
-	# рама и пол
-	_part(v, Vector3(2.4, 0.55, 7.0 + EXT), Vector3(0, 0.72, cz), dark)
-	_part(v, Vector3(2.3, 0.08, lz), Vector3(0, FLOOR_Y - 0.04, cz), Color(0.42, 0.3, 0.2))
-	# стены: левая (+X) целая, правая (−X) с дверным проёмом z 0.3..1.3
-	_wall(v, Vector3(0.1, wh, lz), Vector3(1.15, wy, cz), cream, glass)
-	_wall(v, Vector3(0.1, wh, 3.8 + EXT), Vector3(-1.15, wy, -1.6 - EXT * 0.5), cream, glass)
-	_wall(v, Vector3(0.1, wh, 1.9), Vector3(-1.15, wy, 2.35), cream, glass)
-	_part(v, Vector3(0.1, 0.55, 1.0), Vector3(-1.15, ROOF_Y - 0.3, 0.8), cream)   # перемычка над дверью
-	_part(v, Vector3(2.4, wh, 0.1), Vector3(0, wy, REAR_Z), cream)
-	# полосы снаружи
-	v.add_child(MU.box(Vector3(2.44, 0.18, lz + 0.02), brown, Vector3(0, 1.55, cz)))
-	v.add_child(MU.box(Vector3(2.44, 0.06, lz + 0.02), Color(0.85, 0.5, 0.1), Vector3(0, 1.72, cz)))
-	# крыша (на неё можно залезть по лестнице)
-	_part(v, Vector3(2.4, 0.1, lz), Vector3(0, ROOF_Y, cz), cream)
-	v.add_child(MU.box(Vector3(2.0, 0.06, 3.0 + EXT * 0.7), dark, Vector3(0, ROOF_Y + 0.1, -1.2 - EXT * 0.35)))
-	for e in [-1, 1]:
-		v.add_child(MU.box(Vector3(0.05, 0.15, 3.0 + EXT * 0.7), dark, Vector3(e * 1.0, ROOF_Y + 0.15, -1.2 - EXT * 0.35)))
-	# кондиционер и люк на крыше
-	v.add_child(MU.box(Vector3(0.9, 0.22, 1.3), Color(0.85, 0.85, 0.87), Vector3(0.0, ROOF_Y + 0.2, -3.0)))
-	v.add_child(MU.box(Vector3(0.95, 0.04, 1.35), Color(0.6, 0.6, 0.62), Vector3(0.0, ROOF_Y + 0.33, -3.0)))
-	v.add_child(MU.box(Vector3(0.7, 0.04, 0.7), MU.mat(Color(0.5, 0.7, 0.85, 0.5), 0.1, 0.0, 0.3), Vector3(0.0, ROOF_Y + 0.07, -0.6)))
-	# кабина: капот, приборная панель, лобовое стекло
-	_part(v, Vector3(2.3, 0.75, 1.0), Vector3(0, 1.0, 3.85), cream)
-	_part(v, Vector3(2.3, 0.08, 1.0), Vector3(0, 1.42, 3.85), brown)
-	_part(v, Vector3(2.2, 0.85, 0.5), Vector3(0, 1.475, 3.1), Color(0.36, 0.33, 0.29))
-	_shape(Vector3(2.3, 1.3 + H_UP, 0.08), Vector3(0, 2.55 + H_UP * 0.5, 3.35))
-	v.add_child(MU.box(Vector3(2.3, 1.3 + H_UP, 0.04), glass, Vector3(0, 2.55 + H_UP * 0.5, 3.35)))
-	v.add_child(MU.box(Vector3(2.4, 0.1, 0.12), cream, Vector3(0, ROOF_Y - 0.02, 3.35)))
-	v.add_child(MU.box(Vector3(2.4, 0.3, 0.3), dark, Vector3(0, 0.75, 4.4)))   # бампер
-	# ступеньки у двери
-	for i in 3:
-		var sp := Vector3(-1.45 - i * 0.3, FLOOR_Y - 0.3 - i * 0.3, 0.8)
-		_part(v, Vector3(0.3, 0.08, 0.9), sp, Color(0.35, 0.35, 0.36))
-	# лестница на крышу (сзади)
-	for i in 11:
-		v.add_child(MU.box(Vector3(0.45, 0.04, 0.04), dark, Vector3(-0.6, 0.6 + i * 0.35, REAR_Z - 0.11)))
-	for e in [-1, 1]:
-		v.add_child(MU.box(Vector3(0.04, 3.7, 0.04), dark, Vector3(-0.6 + e * 0.22, 2.4, REAR_Z - 0.11)))
-	add_child(MU.area_box(Vector3(0.7, 3.4, 0.5), Vector3(-0.6, 2.3, REAR_Z - 0.3), "rv_ladder", "St_ladder"))
-	# фары
-	for e in [-1, 1]:
-		v.add_child(MU.box(Vector3(0.35, 0.2, 0.05), MU.mat(Color(1.0, 0.95, 0.8), 0.2, 2.0), Vector3(e * 0.8, 1.15, 4.37)))
-		var sl := SpotLight3D.new()
-		sl.position = Vector3(e * 0.8, 1.15, 4.4)
-		sl.rotation_degrees = Vector3(-5, 180, 0)
-		sl.spot_range = 50.0
-		sl.spot_angle = 35.0
-		sl.light_energy = 4.0
-		sl.shadow_enabled = true
-		sl.visible = false
-		add_child(sl)
-		lights.append(sl)
-	# задние фонари
-	for e in [-1, 1]:
-		v.add_child(MU.box(Vector3(0.18, 0.3, 0.05), MU.mat(Color(0.9, 0.05, 0.05), 0.3, 1.2), Vector3(e * 1.0, 1.5, REAR_Z - 0.06)))
-	# ---- салон
-	# кресла водителя и пассажира
-	for e in [1, -1]:
-		v.add_child(MU.box(Vector3(0.55, 0.12, 0.55), Color(0.25, 0.18, 0.12), Vector3(e * 0.55, 1.5, 2.25)))
-		v.add_child(MU.box(Vector3(0.55, 0.8, 0.12), Color(0.25, 0.18, 0.12), Vector3(e * 0.55, 1.9, 1.95), Vector3(-10, 0, 0)))
-		v.add_child(MU.box(Vector3(0.3, 0.4, 0.4), dark, Vector3(e * 0.55, 1.25, 2.25)))
-	# диван у левой стены
-	v.add_child(MU.box(Vector3(0.55, 0.45, 1.8), Color(0.35, 0.45, 0.3), Vector3(0.82, 1.3, -1.95)))
-	v.add_child(MU.box(Vector3(0.15, 0.6, 1.8), Color(0.35, 0.45, 0.3), Vector3(1.03, 1.8, -1.95)))
-	# стол
-	v.add_child(MU.box(Vector3(0.7, 0.05, 1.0), Color(0.5, 0.36, 0.22), Vector3(0.1, 1.8, -1.95)))
-	v.add_child(MU.box(Vector3(0.08, 0.7, 0.08), dark, Vector3(0.1, 1.42, -1.95)))
-	# плита у правой стены
-	_part(v, Vector3(0.6, 0.9, 1.1), Vector3(-0.82, 1.5, -1.2), Color(0.55, 0.55, 0.57))
-	v.add_child(MU.box(Vector3(0.5, 0.03, 0.9), MU.mat(Color(0.1, 0.1, 0.1), 0.3, 0.0, 0.8), Vector3(-0.82, 1.97, -1.2)))
-	add_child(MU.area_box(Vector3(0.8, 0.6, 1.2), Vector3(-0.72, 2.0, -1.2), "rv_stove", "St_stove"))
-	# кухонная тумба с раковиной вдоль правой стены дальше
-	_part(v, Vector3(0.6, 0.9, 1.6), Vector3(-0.82, 1.5, -2.9), Color(0.5, 0.36, 0.22))
-	v.add_child(MU.box(Vector3(0.62, 0.04, 1.62), Color(0.78, 0.78, 0.8), Vector3(-0.82, 1.97, -2.9)))
-	v.add_child(MU.box(Vector3(0.4, 0.05, 0.5), Color(0.35, 0.37, 0.4), Vector3(-0.82, 1.99, -2.9)))
-	# двухъярусная кровать у левой стены и широкая кровать в хвосте
-	var bz := REAR_Z + 1.3
-	v.add_child(MU.box(Vector3(2.2, 0.5, 1.7), Color(0.4, 0.3, 0.25), Vector3(0, 1.3, bz)))
-	v.add_child(MU.box(Vector3(2.1, 0.14, 1.65), Color(0.85, 0.85, 0.9), Vector3(0, 1.62, bz)))
-	v.add_child(MU.box(Vector3(0.7, 0.1, 0.45), Color(0.9, 0.9, 0.95), Vector3(0.6, 1.74, bz - 0.55)))
-	v.add_child(MU.box(Vector3(0.7, 0.1, 0.45), Color(0.9, 0.9, 0.95), Vector3(-0.6, 1.74, bz - 0.55)))
-	var cz2 := REAR_Z + 3.3
-	for lvl in 2:
-		v.add_child(MU.box(Vector3(0.75, 0.1, 1.9), Color(0.4, 0.3, 0.25), Vector3(0.78, 1.45 + lvl * 0.95, cz2)))
-		v.add_child(MU.box(Vector3(0.72, 0.12, 1.85), Color(0.55, 0.65, 0.75), Vector3(0.78, 1.55 + lvl * 0.95, cz2)))
-	for zz in [cz2 - 0.9, cz2 + 0.9]:
-		v.add_child(MU.box(Vector3(0.06, 2.2, 0.06), dark, Vector3(1.12, 2.15, zz)))
-	# шкаф-сушилка у левой стены
-	_part(v, Vector3(0.55, 2.0 + H_UP, 0.9), Vector3(0.85, 2.05 + H_UP * 0.5, 0.75), brown)
-	add_child(MU.area_box(Vector3(0.7, 1.6, 1.0), Vector3(0.62, 2.0, 0.75), "rv_wardrobe", "St_wardrobe"))
-	# коврик и ящики
-	v.add_child(MU.box(Vector3(1.2, 0.01, 1.8), Color(0.5, 0.2, 0.15), Vector3(0.0, FLOOR_Y + 0.01, -3.9)))
-	_part(v, Vector3(0.5, 0.6, 0.5), Vector3(-0.85, 1.35, REAR_Z + 1.2), Color(0.5, 0.36, 0.22))
-	# места
-	for i in 4:
-		var a := MU.area_box(Vector3(0.6, 0.9, 0.6), SEATS[i][0] + Vector3(0, 0.6, 0), "rv_seat", "St_seat%d" % i)
-		a.set_meta("seat", i)
-		add_child(a)
-	# ---- приборная панель и рычаг КПП
+	RVBuild.body(self, v)
+	RVBuild.interior(self, v)
+	RVBuild.rack(self, v)
 	_build_dashboard(v)
-	# ---- снаружи: разделочный стол, бак, двигатель, крюки
-	v.add_child(MU.box(Vector3(0.7, 0.06, 1.3), Color(0.55, 0.4, 0.25), Vector3(1.6, 1.05, -2.3)))
-	add_child(MU.area_box(Vector3(0.9, 0.8, 1.4), Vector3(1.6, 1.2, -2.3), "rv_butcher", "St_butcher"))
-	v.add_child(MU.cyl(0.08, 0.08, 0.05, dark, Vector3(1.22, 1.2, -0.6), Vector3(0, 0, 90)))
-	add_child(MU.area_box(Vector3(0.5, 0.6, 0.6), Vector3(1.4, 1.2, -0.6), "rv_fuel", "St_fuel"))
-	add_child(MU.area_box(Vector3(1.8, 0.6, 1.0), Vector3(0, 1.6, 3.85), "rv_engine", "St_engine"))
 	# уличный термометр рядом с дверью
 	thermo = Thermometer.new()
 	thermo.position = Vector3(-1.23, 2.1, 1.95)
@@ -256,7 +177,6 @@ func _build() -> void:
 	v.add_child(thermo)
 	for i in 2:
 		var hp_: Vector3 = HOOKS[i]
-		v.add_child(MU.box(Vector3(0.45, 0.3, 0.25), Color(0.6, 0.15, 0.1), hp_))
 		var ha := MU.area_box(Vector3(0.8, 0.8, 0.8), hp_, "rv_hook", "St_hook%d" % i)
 		ha.set_meta("hook", i)
 		add_child(ha)
@@ -273,7 +193,8 @@ func _build() -> void:
 		add_child(cable)
 		cables.append(cable)
 	# колёса: передняя ось и задняя (длинная колёсная база)
-	for wp in [Vector3(1.1, 0.55, 2.6), Vector3(-1.1, 0.55, 2.6), Vector3(1.1, 0.55, -2.4 - EXT * 0.75), Vector3(-1.1, 0.55, -2.4 - EXT * 0.75)]:
+	for wi in 4:
+		var wp: Vector3 = WHEEL_POS[wi]
 		var w := VehicleWheel3D.new()
 		w.position = wp
 		w.wheel_radius = 0.5
@@ -287,14 +208,20 @@ func _build() -> void:
 		w.wheel_roll_influence = 0.12
 		w.use_as_traction = true
 		w.use_as_steering = wp.z > 0.0
-		w.add_child(MU.cyl(0.5, 0.5, 0.35, Color(0.08, 0.08, 0.08), Vector3.ZERO, Vector3(0, 0, 90), 16))
-		w.add_child(MU.cyl(0.28, 0.28, 0.37, MU.mat(Color(0.6, 0.6, 0.62), 0.3, 0.0, 0.8), Vector3.ZERO, Vector3(0, 0, 90), 8))
+		wheel_parts.append(RVBuild.wheel_visual(w))
 		add_child(w)
 		wheels.append(w)
+		var wa := MU.area_box(Vector3(0.9, 1.1, 1.1), Vector3(wp.x * 1.28, wp.y, wp.z), "rv_wheel", "St_wheel%d" % wi)
+		wa.set_meta("wheel", wi)
+		add_child(wa)
 	_build_mirrors()
 	exhaust = _particles(Color(0.35, 0.35, 0.35, 0.4), Vector3(0.9, 0.5, REAR_Z - 0.05), 0.08)
 	smoke = _particles(Color(0.1, 0.1, 0.1, 0.6), Vector3(0, 1.6, 4.2), 0.2)
 	smoke.amount = 24
+	leak = _particles(Color(0.9, 0.75, 0.2, 0.7), Vector3(1.2, 0.5, -0.6), 0.03)
+	leak.gravity = Vector3(0, -6.0, 0)
+	leak.direction = Vector3(1, -0.2, 0)
+	leak.amount = 8
 	cabin_light = OmniLight3D.new()
 	cabin_light.position = Vector3(0, ROOF_Y - 0.3, -0.5 - EXT * 0.5)
 	cabin_light.light_color = Color(1.0, 0.85, 0.6)
@@ -314,14 +241,25 @@ func _build() -> void:
 	winch_snd.volume_db = -60.0
 	winch_snd.bus = "SFX"
 	add_child(winch_snd)
+	jack_node = Node3D.new()
+	jack_node.visible = false
+	add_child(jack_node)
+	jack_node.add_child(MU.cyl(0.07, 0.09, 0.3, MU.mat(Color(0.8, 0.1, 0.05), 0.5, 0.0, 0.4), Vector3(0, 0.15, 0), Vector3.ZERO, 10))
+	jack_node.add_child(MU.cyl(0.04, 0.04, 0.2, MU.mat(Color(0.7, 0.7, 0.72), 0.3, 0.0, 0.9), Vector3(0, 0.38, 0), Vector3.ZERO, 8))
+	jack_node.add_child(MU.cyl(0.1, 0.1, 0.03, MU.mat(Color(0.1, 0.1, 0.1), 0.6), Vector3(0, 0.49, 0), Vector3.ZERO, 10))
 
 
 # ---- приборная панель: только круглые приборы, лампочки-иконки и кнопки-иконки
 const FACE := Basis(Quaternion(Vector3(0, 1, 0), PI) * Quaternion(Vector3(1, 0, 0), -0.9599310885968813))
 
 
-func _panel_pos(xl: float, yl: float, lift := 0.012) -> Vector3:
-	return Vector3(0.55, 1.93, 2.98) + FACE.x * xl + FACE.y * yl + FACE.z * lift
+## Приборы стоят выше обода руля (приборный козырёк), кнопки — на центральной консоли левее руля.
+const PANEL_ORG := Vector3(0.55, 2.13, 3.04)
+const BTN_ORG := Vector3(0.02, 1.96, 3.0)
+
+
+func _panel_pos(xl: float, yl: float, lift := 0.012, org := PANEL_ORG) -> Vector3:
+	return org + FACE.x * xl + FACE.y * yl + FACE.z * lift
 
 
 func _quad(v: Node3D, tex: Texture2D, size: float, pos: Vector3, col: Color, emit := 0.0, transparent := true) -> MeshInstance3D:
@@ -356,24 +294,28 @@ func _gauge(v: Node3D, key: String, xl: float, yl: float, r: float, ticks: int, 
 func _build_dashboard(v: Node3D) -> void:
 	# руль
 	steering_wheel = Node3D.new()
-	steering_wheel.position = Vector3(0.55, 2.12, 2.72)
-	steering_wheel.rotation_degrees = Vector3(-60, 0, 0)
+	steering_wheel.position = Vector3(0.55, 1.9, 2.64)
+	steering_wheel.rotation_degrees = Vector3(-62, 0, 0)
 	v.add_child(steering_wheel)
 	var torus := TorusMesh.new()
-	torus.inner_radius = 0.15
-	torus.outer_radius = 0.19
+	torus.inner_radius = 0.145
+	torus.outer_radius = 0.18
 	var tm := MeshInstance3D.new()
 	tm.mesh = torus
-	tm.material_override = MU.mat(Color(0.1, 0.1, 0.1))
+	tm.material_override = A3.tmat("rubber", Color(0.45, 0.45, 0.45), 0.3, 0.7)
 	steering_wheel.add_child(tm)
 	steering_wheel.add_child(MU.box(Vector3(0.32, 0.03, 0.04), Color(0.1, 0.1, 0.1)))
-	v.add_child(MU.cyl(0.03, 0.03, 0.35, Color(0.1, 0.1, 0.1), Vector3(0.55, 1.98, 2.86), Vector3(-60, 0, 0)))
+	v.add_child(MU.cyl(0.03, 0.03, 0.35, Color(0.1, 0.1, 0.1), Vector3(0.55, 1.78, 2.76), Vector3(-62, 0, 0)))
+	# козырёк приборов: тёмный короб за шкалами, ниже линии взгляда
+	v.add_child(MU.box(Vector3(0.78, 0.28, 0.3), A3.tmat("rubber", Color(0.5, 0.5, 0.5), 0.4, 0.8), Vector3(0.55, 1.97, 3.2)))
 	# приборы: спидометр, тахометр, топливо, состояние двигателя
 	_gauge(v, "speed", 0.0, 0.0, 0.11, 24, 4, -1.0)
 	_gauge(v, "rpm", -0.235, 0.0, 0.085, 10, 2, 0.8)
 	_gauge(v, "fuel", 0.19, 0.085, 0.05, 4, 4, -1.0, "fuel", Color(0.9, 0.85, 0.5))
 	_gauge(v, "engine", 0.19, -0.05, 0.05, 4, 4, -1.0, "engine", Color(0.9, 0.85, 0.5))
 	# контрольные лампочки-иконки
+	# панель кнопок (центральная консоль)
+	v.add_child(MU.box(Vector3(0.5, 0.2, 0.08), A3.tmat("rubber", Color(0.45, 0.45, 0.45), 0.4, 0.8), Vector3(0.02, 1.9, 3.06), Vector3(-35, 0, 0)))
 	var lamp_defs := [["fuel", "fuel", Color(1.0, 0.6, 0.1)], ["engine", "engine", Color(1.0, 0.25, 0.1)],
 		["winch", "winch_front", Color(0.3, 0.9, 1.0)], ["lights", "lights", Color(0.4, 1.0, 0.4)], ["brake", "brake", Color(1.0, 0.2, 0.15)]]
 	for i in lamp_defs.size():
@@ -385,13 +327,13 @@ func _build_dashboard(v: Node3D) -> void:
 	var btns := [["winch_front", "winch_front"], ["winch_rear", "winch_rear"], ["lights", "lights"], ["horn", "horn"]]
 	for i in btns.size():
 		var xl := 0.15 - i * 0.1
-		var yl := -0.17
+		var yl := 0.0
 		var base := MU.box(Vector3(0.085, 0.085, 0.012), MU.mat(Color(0.12, 0.12, 0.14), 0.5), Vector3.ZERO)
-		base.transform = Transform3D(FACE, _panel_pos(xl, yl, 0.005))
+		base.transform = Transform3D(FACE, _panel_pos(xl, yl, 0.005, BTN_ORG))
 		v.add_child(base)
-		var ic := _quad(v, DashIcons.icon(btns[i][1]), 0.062, _panel_pos(xl, yl, 0.0125), Color(0.85, 0.85, 0.8), 0.0)
+		var ic := _quad(v, DashIcons.icon(btns[i][1]), 0.062, _panel_pos(xl, yl, 0.0125, BTN_ORG), Color(0.85, 0.85, 0.8), 0.0)
 		btn_vis[btns[i][0]] = ic
-		var pos := _panel_pos(xl, yl, 0.0)
+		var pos := _panel_pos(xl, yl, 0.0, BTN_ORG)
 		var a := MU.area_box(Vector3(0.13, 0.13, 0.14), pos, "rv_button", "Btn_" + btns[i][0])
 		a.set_meta("action", btns[i][0])
 		add_child(a)
@@ -591,7 +533,7 @@ func is_flipped() -> bool:
 
 
 func heat_radius() -> float:
-	return 6.0 if up_heater > 0 else 0.0
+	return 6.0 if (up_heater > 0 or stove_t > 0.0) else 0.0
 
 
 func set_input(t: float, s: float, b: float) -> void:
@@ -681,6 +623,10 @@ func hook_action(i: int, pid: int) -> String:
 			st[i] = 0
 			on[i] = false
 			res = "msg_cable_back"
+	var wi: Array = winch_item.duplicate()
+	if int(st[i]) != 2:
+		wi[i] = ""
+	winch_item = wi
 	winch_state = st
 	winch_holder = hl
 	winch_on = on
@@ -688,11 +634,20 @@ func hook_action(i: int, pid: int) -> String:
 	return res
 
 
-func attach_cable(i: int, pid: int, point: Vector3) -> String:
+func attach_cable(i: int, pid: int, point: Vector3, item_name := "") -> String:
 	if winch_state[i] != 1 or winch_holder[i] != pid:
 		return ""
 	if point.distance_to(hook_pos(i)) > CABLE_LEN:
 		return "msg_cable_short"
+	var wi: Array = winch_item.duplicate()
+	wi[i] = ""
+	if item_name != "":
+		var it := world.entities.get_node_or_null(item_name) as Item
+		if it == null or it.holder != 0:
+			return ""
+		wi[i] = item_name
+	winch_item = wi
+	winch_len[i] = point.distance_to(hook_pos(i))
 	var st: Array = winch_state.duplicate()
 	var hl: Array = winch_holder.duplicate()
 	var an: Array = winch_anchor.duplicate()
@@ -725,12 +680,18 @@ func _physics_process(delta: float) -> void:
 
 
 func _server_physics(delta: float) -> void:
+	_tick_job(delta)
+	_tick_jack(delta)
+	_tick_cargo(delta)
+	if stove_t > 0.0:
+		stove_t = maxf(stove_t - delta, 0.0)
+	_tick_store(delta)
 	if seats[0] == 0 or Time.get_ticks_msec() - last_in_ms > 600:
 		in_t = 0.0
 		in_s = 0.0
 		in_b = 1.0 if seats[0] == 0 else in_b
 	var speed := linear_velocity.dot(global_basis.z)
-	var running: bool = seats[0] != 0 and fuel > 0.0 and hp > 0.0
+	var running: bool = seats[0] != 0 and fuel > 0.0 and hp > 0.0 and jack_i < 0
 	var ratio: float = GEARS[gear]
 	var gas := maxf(in_t, 0.0)
 	# обороты: от скорости кузова (не от проскальзывающих колёс), плавно
@@ -747,13 +708,19 @@ func _server_physics(delta: float) -> void:
 	var power := BASE_FORCE * float(ENGINE_MULT[up_engine]) * torque_k
 	if not running:
 		power = 0.0
-	elif hp < 30.0:
-		power *= 0.5
+	else:
+		power *= clampf(0.3 + hp / 100.0 * 0.9, 0.3, 1.0)   # побитый двигатель тянет хуже
 	engine_force = gas * power * ratio / 1.6
 	brake = maxf(in_b * 70.0, maxf(-in_t, 0.0) * 50.0)
-	# сцепление зависит от поверхности под колесом
-	for w in wheels:
-		var wp: Vector3 = (w as Node3D).global_position
+	if jack_i >= 0:
+		brake = 120.0
+		engine_force = 0.0
+	# колёса: сцепление от поверхности, спущенные и снятые, прокол вне дороги
+	var flat_pull := 0.0
+	var drag := 0.0
+	for wi in 4:
+		var w := wheels[wi] as VehicleWheel3D
+		var wp: Vector3 = w.global_position
 		var on_road := TerrainGen.road_query(Vector2(wp.x, wp.z)).x < 4.0
 		var h := TerrainGen.height_at(wp.x, wp.z)
 		var slip := 3.0 if on_road else 2.0
@@ -761,42 +728,56 @@ func _server_physics(delta: float) -> void:
 			slip = 1.1   # грязь у воды
 		if world.raining and not on_road:
 			slip *= 0.75
-		(w as VehicleWheel3D).wheel_friction_slip = slip
-	# стабилизатор: возвращает кузов к вертикали, но даёт раскачиваться
+		var st := int(wheel_state[wi])
+		if st == 0 and absf(speed) > 3.0 and not on_road and randf() < PUNCTURE_RATE * absf(speed):
+			_puncture(wi)
+		if st == 1:
+			slip *= 0.6
+			w.wheel_radius = 0.4
+			flat_pull += (1.0 if WHEEL_POS[wi].x > 0.0 else -1.0)
+			drag += 1.0
+		elif st == 2:
+			slip *= 0.3
+			w.wheel_radius = 0.2
+			drag += 2.0
+		else:
+			w.wheel_radius = 0.5
+		w.wheel_friction_slip = slip
+	if flat_pull != 0.0 and jack_i < 0:
+		apply_torque(Vector3.UP * flat_pull * speed * mass * 0.03)
+		apply_central_force(-linear_velocity * mass * 0.05 * drag)
+	# стабилизатор: возвращает кузов к вертикали; тяжёлая крыша делает его слабее
+	var roof_k := clampf(_roof_mass / 700.0, 0.0, 0.55)
 	var up_err := global_basis.y.cross(Vector3.UP)
-	apply_torque(up_err * mass * 6.0 - angular_velocity * Vector3(1, 0, 1) * mass * 0.8)
-	# лебёдки
-	for i in 2:
-		if winch_state[i] == 1:
-			var p: Node = world.get_player(winch_holder[i])
-			if p == null or p.dead or p.global_position.distance_to(hook_pos(i)) > CABLE_LEN + 2.0:
-				hook_action(i, winch_holder[i])
-				if p:
-					world.tell(p.peer_id, T.t("msg_cable_short"))
-		elif winch_state[i] == 2 and winch_on[i]:
-			var hook := hook_pos(i)
-			var anchor: Vector3 = winch_anchor[i]
-			var to := anchor - hook
-			var dist := to.length()
-			winch_len[i] = maxf(winch_len[i] - delta * 1.5, 1.5)
-			if dist > winch_len[i]:
-				var f := minf((dist - winch_len[i]) * 40000.0, WINCH_FORCE)
-				apply_force(to.normalized() * f, hook - global_position)
-			if dist < 2.0:
-				var on: Array = winch_on.duplicate()
-				on[i] = false
-				winch_on = on
+	if jack_i < 0:
+		apply_torque(up_err * mass * 6.0 * (1.0 - roof_k) - angular_velocity * Vector3(1, 0, 1) * mass * 0.8)
+	_tick_winches(delta)
 	var max_steer := lerpf(0.5, 0.16, clampf(absf(speed) / 25.0, 0.0, 1.0))
 	steering = move_toward(steering, in_s * max_steer, delta * 1.6)
 	steer_vis = steering
 	throttle_vis = gas if power > 0.0 else 0.0
 	if running:
 		fuel = maxf(fuel - delta * (0.02 + gas * 0.12 * rpm / MAX_RPM), 0.0)
-	# удары
-	var dv := (linear_velocity - prev_vel).length()
-	if dv > 5.0:
+	# течь из бака
+	if hp_tank < 45.0 and fuel > 0.0:
+		fuel = maxf(fuel - delta * (1.0 - hp_tank / 45.0) * 0.15, 0.0)
+	# удары: по месту удара страдают разные части
+	var dvv := linear_velocity - prev_vel
+	var dv := dvv.length()
+	if dv > 5.0 and jack_i < 0:
 		var dmg := (dv - 5.0) * 6.0 * float(ARMOR_MULT[up_armor])
-		hp = maxf(hp - dmg, 0.0)
+		var ld := global_basis.inverse() * dvv
+		hp_body = maxf(hp_body - dmg * 0.7, 0.0)
+		if ld.z < -0.5 * dv:                 # лобовой удар — страдает двигатель
+			hp = maxf(hp - dmg * 0.8, 0.0)
+		elif ld.z > 0.5 * dv:                # удар сзади — бак
+			hp_tank = maxf(hp_tank - dmg * 0.9, 0.0)
+		else:                                # боковой — колесо с этой стороны
+			var side := 0 if ld.x < 0.0 else 1
+			var wi := side + (0 if randf() < 0.5 else 2)
+			_wheel_damage(wi, dmg * 1.2)
+		if randf() < 0.3:
+			_wheel_damage(randi() % 4, dmg * 0.5)
 		world.sfx_all("crash", global_position, clampf(dv * 0.8 - 6.0, -6.0, 6.0), 1.0)
 	prev_vel = linear_velocity
 	if is_flipped():
@@ -814,6 +795,320 @@ func _server_physics(delta: float) -> void:
 		flip_upright()
 
 
+func _wheel_damage(wi: int, dmg: float) -> void:
+	var a: Array = wheel_hp.duplicate()
+	a[wi] = maxf(float(a[wi]) - dmg, 0.0)
+	wheel_hp = a
+	if a[wi] <= 0.0 and int(wheel_state[wi]) == 0:
+		_puncture(wi)
+
+
+func _puncture(wi: int) -> void:
+	var a: Array = wheel_state.duplicate()
+	a[wi] = 1
+	wheel_state = a
+	world.sfx_all("whoosh", (wheels[wi] as Node3D).global_position, 4.0, 1.0)
+	world.broadcast(T.t("msg_puncture"))
+
+
+var _roof_mass := 0.0
+
+
+## Масса груза (внутри, на крыше, люди) меняет массу, центр тяжести и мягкость подвески.
+func _tick_cargo(delta: float) -> void:
+	_cargo_t -= delta
+	if _cargo_t > 0.0:
+		return
+	_cargo_t = 0.25
+	var inv := global_transform.affine_inverse()
+	var total := 0.0
+	var moment := Vector3.ZERO
+	var roof := 0.0
+	for n in get_tree().get_nodes_in_group("items"):
+		var it := n as Item
+		if it == null or it.holder != 0 or it.is_queued_for_deletion():
+			continue
+		var l: Vector3 = inv * it.global_position
+		if l.x > RIDE_MIN.x and l.x < RIDE_MAX.x and l.y > RIDE_MIN.y and l.y < RIDE_MAX.y and l.z > RIDE_MIN.z and l.z < RIDE_MAX.z:
+			total += it.mass
+			moment += l * it.mass
+			if l.y > ROOF_Y:
+				roof += it.mass
+	for pid in world.players:
+		var pl: Node = world.players[pid]
+		if pl != null and contains(pl.global_position):
+			var l2: Vector3 = inv * pl.global_position
+			total += 80.0
+			moment += l2 * 80.0
+			if l2.y > ROOF_Y:
+				roof += 80.0
+	var fuel_m := fuel * 0.75
+	moment += Vector3(1.4, 0.8, -0.6) * fuel_m
+	total += fuel_m
+	cargo_mass = total
+	_roof_mass = roof
+	mass = BASE_MASS + total
+	var com := (BASE_COM * BASE_MASS + moment) / mass
+	center_of_mass = Vector3(clampf(com.x, -0.6, 0.6), clampf(com.y, 0.2, 1.6), clampf(com.z, -2.5, 0.5))
+	var soft := lerpf(1.0, 0.72, clampf(total / 1500.0, 0.0, 1.0))
+	for w in wheels:
+		(w as VehicleWheel3D).suspension_stiffness = 26.0 * soft
+
+
+func _tick_store(delta: float) -> void:
+	var changed := false
+	for k in ["fridge", "shelf", "locker"]:
+		var arr: Array = store[k]
+		var rate := FRIDGE_COLD if k == "fridge" else 1.0
+		for e in arr:
+			if ItemsDB.PERISHABLE.has(e.kind):
+				e["age"] = float(e.get("age", 0.0)) + delta * rate
+				changed = true
+	if changed and Engine.get_physics_frames() % 60 == 0:
+		store = store.duplicate(true)   # чтобы синхронизатор «по изменению» увидел новое
+
+
+## Домкрат: у поднятого угла удлиняется подвеска (кузов приподнимается), дом стоит на месте.
+func _tick_jack(delta: float) -> void:
+	for wi in wheels.size():
+		var w := wheels[wi] as VehicleWheel3D
+		var lift := 0.35 * jack_t if wi == jack_i else 0.0
+		w.wheel_rest_length = 0.3 + lift
+		w.suspension_travel = 0.45 + lift
+	if jack_i >= 0:
+		linear_velocity.x = 0.0
+		linear_velocity.z = 0.0
+		angular_velocity.y = 0.0
+		brake = 120.0
+		engine_force = 0.0
+
+
+func _tick_winches(delta: float) -> void:
+	for i in 2:
+		if winch_state[i] == 1:
+			var p: Node = world.get_player(winch_holder[i])
+			if p == null or p.dead or p.global_position.distance_to(hook_pos(i)) > CABLE_LEN + 2.0:
+				hook_action(i, winch_holder[i])
+				if p:
+					world.tell(p.peer_id, T.t("msg_cable_short"))
+		elif winch_state[i] == 2:
+			var hook := hook_pos(i)
+			var item_name: String = winch_item[i]
+			if item_name != "":
+				var it := world.entities.get_node_or_null(item_name) as Item
+				if it == null or it.is_queued_for_deletion() or it.holder != 0:
+					hook_action(i, 0)
+					continue
+				winch_anchor[i] = it.global_position
+				if winch_on[i]:
+					winch_len[i] = maxf(winch_len[i] - delta * 1.2, 2.2)
+				var to := hook - it.global_position
+				var dist := to.length()
+				if dist > winch_len[i] and dist > 0.1:
+					var dir := to / dist
+					var rel := (it.linear_velocity - linear_velocity).dot(dir)
+					var f := clampf((dist - winch_len[i]) * 18000.0 - rel * 600.0, 0.0, WINCH_FORCE)
+					it.apply_central_force(dir * f)
+					apply_force(-dir * f, hook - global_position)
+				if winch_on[i] and dist < 2.4:
+					var on2: Array = winch_on.duplicate()
+					on2[i] = false
+					winch_on = on2
+			elif winch_on[i]:
+				var anchor: Vector3 = winch_anchor[i]
+				var hook2 := hook
+				var to2 := anchor - hook2
+				var dist2 := to2.length()
+				winch_len[i] = maxf(winch_len[i] - delta * 1.5, 1.5)
+				if dist2 > winch_len[i]:
+					var f2 := minf((dist2 - winch_len[i]) * 40000.0, WINCH_FORCE)
+					apply_force(to2.normalized() * f2, hook2 - global_position)
+				if dist2 < 2.0:
+					var on: Array = winch_on.duplicate()
+					on[i] = false
+					winch_on = on
+
+
+# ======================================================================= РАБОТЫ (удержание E)
+## Старт/стоп длительной работы. kind: refuel, pump, repair, unbolt, mount, jack_up, jack_down.
+func start_job(pid: int, kind: String, idx: int, extra := {}) -> void:
+	var pl: Node = world.get_player(pid)
+	if pl == null or pl.dead:
+		return
+	if kind in ["jack_up", "unbolt", "mount"] and (linear_velocity.length() > 1.5 or seats[0] != 0 and kind != "jack_down"):
+		world.tell(pid, T.t("msg_rv_moving"))
+		return
+	job = {"pid": pid, "kind": kind, "idx": idx, "t": 0.0, "extra": extra, "snd": 0.0}
+
+
+func stop_job(pid: int) -> void:
+	if not job.is_empty() and int(job.pid) == pid:
+		job = {}
+
+
+func _tick_job(delta: float) -> void:
+	if job.is_empty():
+		return
+	var pl: Node = world.get_player(int(job.pid))
+	var far: bool = pl != null and (pl.global_position.distance_to(job.extra.get("pos", global_position)) > 8.0 if job.kind == "pump" else pl.global_position.distance_to(global_position) > 10.0)
+	if pl == null or pl.dead or far:
+		job = {}
+		return
+	var pid := int(job.pid)
+	var kind: String = job.kind
+	var idx := int(job.idx)
+	job.t = float(job.t) + delta
+	job.snd = float(job.snd) - delta
+	var tick_snd: bool = float(job.snd) <= 0.0
+	if tick_snd:
+		job.snd = 0.45
+	match kind:
+		"refuel":
+			var can := world.get_held_item(pid) as Item
+			if can == null or can.kind != "jerrycan":
+				job = {}
+				return
+			var liters := minf(3.5 * delta, minf(can.q * CAN_LITERS, max_fuel - fuel))
+			if liters <= 0.0:
+				world.tell(pid, T.t("msg_tank_full") if fuel >= max_fuel - 0.1 else T.t("msg_can_empty"))
+				job = {}
+				return
+			fuel += liters
+			can.q = maxf(can.q - liters / CAN_LITERS, 0.0)
+			if tick_snd:
+				world.sfx_all("fuel", global_position, -4.0, 1.0)
+		"pump":
+			if not world.pump_tick(pid, delta, job.extra):
+				job = {}
+				return
+			if tick_snd:
+				world.sfx_all("fuel", global_position, -4.0, 1.0)
+		"repair":
+			var rate := 14.0 * delta
+			var part := str(job.extra.get("part", "engine"))
+			var done := false
+			match part:
+				"engine":
+					hp = minf(hp + rate, 100.0)
+					done = hp >= 100.0
+				"body":
+					hp_body = minf(hp_body + rate, 100.0)
+					done = hp_body >= 100.0
+				"tank":
+					hp_tank = minf(hp_tank + rate, 100.0)
+					done = hp_tank >= 100.0
+				"wheel":
+					if int(wheel_state[idx]) == 0:
+						var a: Array = wheel_hp.duplicate()
+						a[idx] = minf(float(a[idx]) + rate, 100.0)
+						wheel_hp = a
+						done = a[idx] >= 100.0
+					else:
+						done = true
+			if tick_snd:
+				world.sfx_all("repair", global_position, -6.0, 1.0)
+			if done:
+				world.tell(pid, T.t("msg_part_ok"))
+				job = {}
+		"jack_up":
+			if jack_i != idx:
+				jack_i = idx
+			jack_t = minf(jack_t + delta / 2.5, 1.0)
+			if tick_snd:
+				world.sfx_all("click", global_position, -4.0, 0.6)
+			if jack_t >= 1.0:
+				world.tell(pid, T.t("msg_jacked"))
+				job = {}
+		"jack_down":
+			jack_t = maxf(jack_t - delta / 2.0, 0.0)
+			if tick_snd:
+				world.sfx_all("click", global_position, -4.0, 0.5)
+			if jack_t <= 0.0:
+				jack_i = -1
+				world.tell(pid, T.t("msg_jack_down"))
+				job = {}
+		"unbolt":
+			if jack_i != idx or jack_t < 0.99 or int(wheel_state[idx]) == 2:
+				job = {}
+				return
+			if tick_snd:
+				world.sfx_all("click", global_position, -2.0, 1.4)
+			if float(job.t) >= 3.0:
+				var was := int(wheel_state[idx])
+				var q := float(wheel_hp[idx]) / 100.0
+				var a: Array = wheel_state.duplicate()
+				a[idx] = 2
+				wheel_state = a
+				var wp: Vector3 = (wheels[idx] as Node3D).global_position + global_basis.x * (1.0 if WHEEL_POS[idx].x > 0.0 else -1.0) * 0.8
+				world.spawn_item("wheel_flat" if was == 1 else "spare_wheel", wp + Vector3.UP * 0.4, global_basis.x * (1.0 if WHEEL_POS[idx].x > 0.0 else -1.0) * 1.2, q)
+				world.sfx_all("thud", wp, 0.0, 1.0)
+				world.tell(pid, T.t("msg_wheel_off"))
+				job = {}
+		"mount":
+			var wheel_it := world.get_held_item(pid) as Item
+			if wheel_it == null or wheel_it.kind != "spare_wheel" or jack_i != idx or jack_t < 0.99 or int(wheel_state[idx]) != 2:
+				job = {}
+				return
+			if tick_snd:
+				world.sfx_all("click", global_position, -2.0, 1.4)
+			if float(job.t) >= 3.5:
+				var a2: Array = wheel_state.duplicate()
+				a2[idx] = 0
+				wheel_state = a2
+				var h2: Array = wheel_hp.duplicate()
+				h2[idx] = maxf(wheel_it.q * 100.0, 40.0)
+				wheel_hp = h2
+				wheel_it.queue_free()
+				world.sfx_all("repair", global_position, 0.0, 1.2)
+				world.tell(pid, T.t("msg_wheel_on"))
+				job = {}
+
+
+# ---- склад (хост)
+func store_put(key: String, entry: Dictionary) -> bool:
+	if not store.has(key):
+		return false
+	var arr: Array = store[key]
+	if arr.size() >= int(STORE_CAP[key]):
+		return false
+	arr.append(entry)
+	store = store.duplicate(true)
+	return true
+
+
+func store_take(key: String, i: int) -> Dictionary:
+	if not store.has(key):
+		return {}
+	var arr: Array = store[key]
+	if i < 0 or i >= arr.size():
+		return {}
+	var e: Dictionary = arr[i]
+	arr.remove_at(i)
+	store = store.duplicate(true)
+	return e
+
+
+## Свободное место на багажнике: возвращает позицию (мировую) или Vector3.INF.
+func rack_free_slot() -> Vector3:
+	var inv := global_transform.affine_inverse()
+	var taken: Array = []
+	for n in get_tree().get_nodes_in_group("items"):
+		var it := n as Item
+		if it != null and not it.is_queued_for_deletion():
+			var l: Vector3 = inv * it.global_position
+			if l.y > ROOF_Y and l.y < ROOF_Y + 1.8:
+				taken.append(Vector2(l.x, l.z))
+	for sl in RVBuild.RACK_SLOTS:
+		var ok := true
+		for t in taken:
+			if Vector2(sl.x, sl.z).distance_to(t) < 0.75:
+				ok = false
+				break
+		if ok:
+			return global_transform * Vector3(sl.x, ROOF_Y + 0.7, sl.z)
+	return Vector3.INF
+
+
 func _set_needle(key: String, k: float, sweep: float) -> void:
 	var n: Node3D = needles[key]
 	var target := lerpf(sweep, -sweep, k)
@@ -821,6 +1116,18 @@ func _set_needle(key: String, k: float, sweep: float) -> void:
 	cur = lerpf(cur, target, 0.2)
 	n.set_meta("a", cur)
 	n.basis = FACE * Basis(Vector3(0, 0, 1), cur)
+
+
+func _make_dents() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77
+	var v := get_node("Vis")
+	for i in 12:
+		var e := 1.0 if i % 2 == 0 else -1.0
+		var m := MU.box(Vector3(0.02, rng.randf_range(0.2, 0.5), rng.randf_range(0.3, 0.9)), MU.mat(Color(0.12, 0.1, 0.09, 0.85), 1.0), Vector3(e * 1.19, rng.randf_range(1.6, 2.8), rng.randf_range(-6.0, 2.0)), Vector3(rng.randf_range(-8, 8), 0, rng.randf_range(-12, 12)))
+		m.visible = false
+		v.add_child(m)
+		_dent_nodes.append(m)
 
 
 func _lamp(key: String, on: bool) -> void:
@@ -833,9 +1140,34 @@ func _lamp(key: String, on: bool) -> void:
 
 func _effects(delta: float) -> void:
 	_update_mirrors()
-	var running: bool = seats[0] != 0 and fuel > 0.0 and hp > 0.0
+	var running: bool = seats[0] != 0 and fuel > 0.0 and hp > 0.0 and jack_i < 0
 	exhaust.emitting = running
-	smoke.emitting = hp < 30.0
+	smoke.emitting = hp < 30.0 or hp_body < 12.0
+	leak.emitting = hp_tank < 45.0 and fuel > 0.0
+	# печь: свет и искры
+	stove_light.visible = stove_t > 0.0
+	stove_light.light_energy = 1.0 + 0.4 * sin(Time.get_ticks_msec() * 0.02) if stove_t > 0.0 else 0.0
+	stove_fx.emitting = stove_t > 0.0
+	# колёса: спущенные приплюснуты, снятые невидимы; домкрат под поднятым углом
+	for wi in wheel_parts.size():
+		var st := int(wheel_state[wi])
+		var tire: Node3D = wheel_parts[wi].tire
+		var rim: Node3D = wheel_parts[wi].rim
+		tire.visible = st != 2
+		rim.visible = st != 2
+		tire.scale = Vector3(1.0, 0.8, 0.8) if st == 1 else Vector3.ONE
+		tire.position.y = -0.05 if st == 1 else 0.0
+	jack_node.visible = jack_i >= 0
+	if jack_i >= 0:
+		var wp: Vector3 = WHEEL_POS[jack_i]
+		jack_node.position = Vector3(wp.x * 0.78, 0.05, wp.z)
+		jack_node.scale = Vector3(1, 0.85 + jack_t * 0.5, 1)
+	# вмятины и царапины на кузове по мере повреждения
+	if _dent_nodes.is_empty():
+		_make_dents()
+	var nd := int(clampf((100.0 - hp_body) / 8.0, 0.0, float(_dent_nodes.size())))
+	for i in _dent_nodes.size():
+		(_dent_nodes[i] as Node3D).visible = i < nd
 	var spd := sync_vel.length()
 	if running:
 		engine_snd.volume_db = lerpf(engine_snd.volume_db, -4.0, 0.1)
@@ -878,6 +1210,11 @@ func _effects(delta: float) -> void:
 		var show := false
 		if winch_state[i] == 2:
 			b = winch_anchor[i]
+			var wn: String = winch_item[i] if winch_item.size() > i else ""
+			if wn != "" and world:
+				var wit := world.entities.get_node_or_null(wn) as Node3D
+				if wit:
+					b = wit.global_position
 			show = true
 		elif winch_state[i] == 1 and world:
 			var p: Node = world.get_player(winch_holder[i])

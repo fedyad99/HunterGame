@@ -21,3 +21,8 @@
 
 ## Звуки
 См. `sounds/` — CC0 или сгенерированы.
+
+## Дом на колёсах: текстуры и мебель (CC0)
+- **ambientCG** (CC0 1.0), 1K → 512 px: Fabric030, Leather011, Metal032, Metal038, Plastic010, Rubber004, Wood049, Rust004 → `assets/textures/rv/`. https://ambientcg.com
+- **Poly Haven** (CC0), 1K: `modern_arm_chair_01`, `sofa_02`, `barrel_stove`, `small_wooden_table_01`, `painted_wooden_cabinet`, `metal_jerrycan`, `metal_toolbox`, `rusted_wheel_rim_01`, `wooden_crate_01` → `assets/models/`. https://polyhaven.com
+- Сам кузов, кабина, сиденья, холодильник, стеллаж, багажник и приборы — собраны кодом (`scripts/rv_build.gd`), готовой CC0-модели дома на колёсах найти не удалось.

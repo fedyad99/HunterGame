@@ -51,6 +51,7 @@ var cm: CharModel
 var look_code := ""
 var head: Node3D
 var gun: Node3D
+var draw_t := 0.0
 var raincoat_mi: MeshInstance3D
 var name_label: Label3D
 var shape: CollisionShape3D
@@ -115,6 +116,10 @@ var _ride_vis := Transform3D()
 var _was_ride := false
 var cable_ok := false
 var cable_far := false
+var cable_item := ""
+var _work := {}
+var _work_key := ""
+var _kit_t := 0.0
 var cable_point := Vector3.ZERO
 
 
@@ -443,7 +448,10 @@ func _owner_physics(delta: float) -> void:
 		if reload_t <= 0.0:
 			_finish_reload()
 	_update_needs(delta)
+	_age_food(delta)
 	_check_weapon_valid()
+	if not dead:
+		_work_poll(delta)
 	_ride_rv(delta)
 	if dead:
 		_dead_update(delta)
@@ -775,12 +783,16 @@ func _update_target() -> void:
 	var rv: RV = world.rv
 	if rv and seated < 0 and rv.cable_holder_of(peer_id) >= 0 and target_kind != "rv_hook":
 		var i := rv.cable_holder_of(peer_id)
-		var q2 := PhysicsRayQueryParameters3D.create(start, start + fwd * 6.0, MU.L_WORLD | MU.L_RV, [get_rid()])
+		var q2 := PhysicsRayQueryParameters3D.create(start, start + fwd * 6.0, MU.L_WORLD | MU.L_RV | MU.L_ITEMS, [get_rid()])
 		var r2 := get_world_3d().direct_space_state.intersect_ray(q2)
 		if not r2.is_empty():
 			cable_point = r2.position
 			cable_ok = r2.position.distance_to(rv.hook_pos(i)) <= RV.CABLE_LEN
 			cable_far = not cable_ok
+			cable_item = ""
+			var hit_it := r2.collider as Item
+			if hit_it != null and ItemsDB.ITEMS[hit_it.kind].get("big", false):
+				cable_item = hit_it.name
 		target_kind = "cable_place" if not r2.is_empty() else "cable_hold"
 
 
@@ -813,7 +825,7 @@ func get_prompt() -> String:
 		"rv_ladder":
 			return T.t("prompt_ladder_up") if global_position.y < world.rv.global_position.y + 3.0 else T.t("prompt_ladder_down")
 		"cable_place":
-			return T.t("prompt_cable_attach") if cable_ok else T.t("prompt_cable_far")
+			return (T.t("prompt_cable_item") if cable_item != "" else T.t("prompt_cable_attach")) if cable_ok else T.t("prompt_cable_far")
 		"cable_hold":
 			return T.t("prompt_holding_cable")
 		"rv_stove", "campfire":
@@ -824,14 +836,32 @@ func get_prompt() -> String:
 			return T.t("prompt_butcher") if held and str(held.kind).begins_with("carcass_") else T.t("prompt_need_carcass")
 		"rv_wardrobe":
 			return T.t("prompt_wardrobe")
-		"rv_engine":
-			return T.t("prompt_repair") if inv_has("repair_kit") else T.t("prompt_engine_state", [int(world.rv.hp)])
+		"rv_engine", "rv_body":
+			var pk := "engine" if target_kind == "rv_engine" else "body"
+			var ph: float = world.rv.hp if pk == "engine" else world.rv.hp_body
+			if inv_has("repair_kit") and ph < 99.9:
+				return T.t("prompt_repair_hold", [T.t("part_" + pk), int(ph)])
+			return T.t("prompt_part_ok", [T.t("part_" + pk), int(ph)])
 		"rv_fuel":
-			return T.t("prompt_jerrycan") if held and held.kind == "jerrycan" else T.t("prompt_fuel_state", [int(world.rv.fuel), int(world.rv.max_fuel)])
+			if held and held.kind == "jerrycan":
+				return T.t("prompt_refuel_hold", [int(world.rv.fuel), int(world.rv.max_fuel)]) if held.q > 0.01 else T.t("prompt_can_empty", [int(world.rv.fuel), int(world.rv.max_fuel)])
+			if inv_has("repair_kit") and world.rv.hp_tank < 99.9:
+				return T.t("prompt_repair_hold", [T.t("part_tank"), int(world.rv.hp_tank)])
+			return T.t("prompt_fuel_state", [int(world.rv.fuel), int(world.rv.max_fuel)])
+		"rv_wheel":
+			return _wheel_prompt()
+		"rv_fridge":
+			return T.t("prompt_fridge")
+		"rv_shelf":
+			return T.t("prompt_shelf")
+		"rv_locker":
+			return T.t("prompt_locker")
+		"rv_rack":
+			return T.t("prompt_rack_put") if held and ItemsDB.ITEMS[held.kind].get("big", false) else T.t("prompt_rack_hint")
 		"shop":
 			return T.t("prompt_shop")
 		"pump":
-			return T.t("prompt_pump", [ItemsDB.FUEL_PRICE])
+			return T.t("prompt_pump_hold", [ItemsDB.FUEL_PRICE])
 		"sell_bin":
 			return T.t("prompt_sell_bin")
 		"water":
@@ -867,7 +897,7 @@ func _interact() -> void:
 			world.rpc_id(1, "req_hook", int(target_node.get_meta("hook")))
 		"cable_place":
 			if cable_ok and rv:
-				world.rpc_id(1, "req_attach", rv.cable_holder_of(peer_id), cable_point)
+				world.rpc_id(1, "req_attach", rv.cable_holder_of(peer_id), cable_point, cable_item)
 		"rv_ladder":
 			if global_position.y < rv.global_position.y + 3.0:
 				global_position = rv.global_transform * Vector3(-0.6, RV.ROOF_Y + 0.25, RV.REAR_Z + 0.6)
@@ -888,16 +918,137 @@ func _interact() -> void:
 				world.rpc_id(1, "req_station", target_node.get_path(), "")
 			elif inv_remove("meat_raw"):
 				world.rpc_id(1, "req_station", target_node.get_path(), "meat_raw")
-		"rv_engine":
-			if inv_remove("repair_kit"):
-				world.rpc_id(1, "req_station", target_node.get_path(), "repair_kit")
-		"", "cable_hold":
-			pass
+		"rv_fridge":
+			world.hud.open_storage(self, "fridge")
+		"rv_shelf":
+			world.hud.open_storage(self, "shelf")
+		"rv_locker":
+			world.hud.open_storage(self, "locker")
+		"rv_rack":
+			world.rpc_id(1, "req_rack")
+		"rv_engine", "rv_body", "rv_fuel", "rv_wheel", "pump", "", "cable_hold":
+			pass   # длительные работы — удержанием E, см. _work_poll
 		_:
 			world.rpc_id(1, "req_station", target_node.get_path(), "")
 
 
 ## number_two = false — по-маленькому (стоя), true — по-большому (присев).
+func _wheel_prompt() -> String:
+	var rv: RV = world.rv
+	var wi := int(target_node.get_meta("wheel"))
+	var st := int(rv.wheel_state[wi])
+	var held: Node = world.get_held_item(peer_id)
+	if rv.jack_i == wi and rv.jack_t > 0.99:
+		if st == 2:
+			return T.t("prompt_wheel_mount") if held and held.kind == "spare_wheel" else T.t("prompt_wheel_need_spare")
+		return T.t("prompt_wheel_unbolt") if st == 1 else T.t("prompt_jack_down")
+	if rv.jack_i >= 0:
+		return ""
+	if st == 1:
+		return T.t("prompt_wheel_jack") if inv_has("jack") else T.t("prompt_wheel_flat")
+	if inv_has("repair_kit") and float(rv.wheel_hp[wi]) < 99.9:
+		return T.t("prompt_repair_hold", [T.t("part_wheel"), int(rv.wheel_hp[wi])])
+	return T.t("prompt_wheel_state", [int(rv.wheel_hp[wi])])
+
+
+## Что делает удержание E на текущей цели: {kind, idx, extra} или пусто.
+func _work_for_target() -> Dictionary:
+	var rv: RV = world.rv
+	if rv == null or target_node == null or seated >= 0:
+		return {}
+	var held: Node = world.get_held_item(peer_id)
+	match target_kind:
+		"rv_fuel":
+			if held and held.kind == "jerrycan" and held.q > 0.01 and rv.fuel < rv.max_fuel - 0.1:
+				return {"kind": "refuel", "idx": 0, "extra": {}}
+			if inv_has("repair_kit") and rv.hp_tank < 99.9:
+				return {"kind": "repair", "idx": 0, "extra": {"part": "tank"}}
+		"rv_engine":
+			if inv_has("repair_kit") and rv.hp < 99.9:
+				return {"kind": "repair", "idx": 0, "extra": {"part": "engine"}}
+		"rv_body":
+			if inv_has("repair_kit") and rv.hp_body < 99.9:
+				return {"kind": "repair", "idx": 0, "extra": {"part": "body"}}
+		"pump":
+			return {"kind": "pump", "idx": 0, "extra": {"pos": target_node.global_position}}
+		"rv_wheel":
+			var wi := int(target_node.get_meta("wheel"))
+			var st := int(rv.wheel_state[wi])
+			if rv.jack_i == wi and rv.jack_t > 0.99:
+				if st == 2:
+					if held and held.kind == "spare_wheel":
+						return {"kind": "mount", "idx": wi, "extra": {}}
+				elif st == 1:
+					return {"kind": "unbolt", "idx": wi, "extra": {}}
+				else:
+					return {"kind": "jack_down", "idx": wi, "extra": {}}
+			elif rv.jack_i < 0:
+				if st == 1 and inv_has("jack"):
+					return {"kind": "jack_up", "idx": wi, "extra": {}}
+				if st == 0 and inv_has("repair_kit") and float(rv.wheel_hp[wi]) < 99.9:
+					return {"kind": "repair", "idx": wi, "extra": {"part": "wheel"}}
+	return {}
+
+
+func _work_poll(delta: float) -> void:
+	var want := _work_for_target() if not world.hud.menu_open() else {}
+	var key := "" if want.is_empty() else "%s|%d|%s" % [want.kind, want.idx, str(want.extra.get("part", ""))]
+	var pressed := Input.is_action_pressed("interact")
+	if not _work.is_empty():
+		var keep: bool = pressed and key == _work_key
+		# jack_up/unbolt и т.п. заканчивает хост; мы просто ждём, пока клавишу отпустят
+		if not keep:
+			world.rpc_id(1, "req_work", _work.kind, _work.idx, false, {})
+			_work = {}
+			_work_key = ""
+		elif _work.kind == "repair":
+			_kit_t += delta
+			if _kit_t >= 0.25:
+				_use_kit(_kit_t)
+				_kit_t = 0.0
+		return
+	if pressed and Input.is_action_just_pressed("interact") and not want.is_empty():
+		_work = want
+		_work_key = key
+		_kit_t = 0.0
+		world.rpc_id(1, "req_work", want.kind, want.idx, true, want.extra)
+
+
+## Ремкомплект расходуется, пока идёт ремонт: полный комплект на ~10 секунд работы.
+func _use_kit(dt: float) -> void:
+	for i in inventory.size():
+		if inventory[i].kind == "repair_kit":
+			inventory[i].q = float(inventory[i].q) - dt / 10.0
+			if inventory[i].q <= 0.0:
+				inventory.remove_at(i)
+				world.hud.add_msg(T.t("msg_need_kit"))
+				world.rpc_id(1, "req_work", "repair", 0, false, {})
+				_work = {}
+				_work_key = ""
+			return
+
+
+func _age_food(delta: float) -> void:
+	for e in inventory:
+		if ItemsDB.PERISHABLE.has(e.kind):
+			e["age"] = float(e.get("age", 0.0)) + delta
+
+
+@rpc("any_peer", "call_local", "reliable")
+func recv_store_item(entry: Dictionary) -> void:
+	if not is_multiplayer_authority():
+		return
+	var k := str(entry.get("kind", ""))
+	if not ItemsDB.ITEMS.has(k):
+		return
+	if can_add(k):
+		inventory.append({"kind": k, "q": float(entry.get("q", 1.0)), "age": float(entry.get("age", 0.0))})
+		Sfx.play_ui("pickup", -6)
+	else:
+		world.hud.add_msg(T.t("msg_inv_full"))
+		world.rpc_id(1, "req_spawn_item", k, float(entry.get("q", 1.0)), global_position + Vector3.UP * 1.2 - global_basis.z * 0.8, Vector3.ZERO)
+
+
 func do_toilet(number_two: bool) -> void:
 	if emote in ACTION_EMOTES:
 		return
@@ -985,7 +1136,7 @@ func use_slot(i: int) -> void:
 			if emote in ACTION_EMOTES:
 				return
 			inventory.remove_at(i)
-			_consume(e.kind)
+			_consume(e.kind, ItemsDB.freshness(e.kind, float(e.get("age", 0.0))))
 			_do_action("eat" if def.use == "eat" else "drink")
 		"smoke":
 			if emote in ACTION_EMOTES:
@@ -1025,9 +1176,16 @@ func drop_slot(i: int) -> void:
 	world.rpc_id(1, "req_spawn_item", e.kind, float(e.q), global_position + Vector3.UP * 1.2 + fwd * 0.7, fwd * 2.0)
 
 
-func _consume(kind: String) -> void:
+func _consume(kind: String, fresh := 0) -> void:
 	var f: Dictionary = ItemsDB.FOOD.get(kind, {})
-	hunger = clampf(hunger + float(f.get("hunger", 0.0)), 0, 100)
+	var hk := 0.4 if fresh == 2 else 1.0
+	hunger = clampf(hunger + float(f.get("hunger", 0.0)) * hk, 0, 100)
+	if fresh == 2:
+		poison += 45.0
+		world.hud.add_msg(T.t("msg_rotten"))
+	elif fresh == 1 and randf() < 0.25:
+		poison += 30.0
+		world.hud.add_msg(T.t("msg_poisoned"))
 	thirst = clampf(thirst + float(f.get("thirst", 0.0)), 0, 100)
 	bladder = clampf(bladder + float(f.get("bladder", 0.0)), 0, 100)
 	warmth = clampf(warmth + float(f.get("warmth", 0.0)), 0, 100)
@@ -1118,7 +1276,7 @@ func _on_shoot_pressed() -> void:
 			world.rpc_id(1, "req_throw", dir)
 			Sfx.play_at("whoosh", global_position, -6)
 		return
-	if shoot_cd > 0.0 or reload_t > 0.0 or emote == "squat":
+	if shoot_cd > 0.0 or reload_t > 0.0 or emote == "squat" or draw_t < 0.85:
 		return
 	if not Input.is_action_just_pressed("shoot"):
 		return
@@ -1498,19 +1656,29 @@ func _animate(delta: float) -> void:
 			if fmod(t, 2.3) < 1.0:
 				cm.pose_arm("R", Vector3(0.3, -0.5, -0.7), Vector3(-0.15, 0.9, -0.5))
 				head_pitch = -0.15
-	if aim_pose and aim_vis:
-		# приклад в плечо, ствол смотрит туда же, куда камера
-		var pa := clampf(aim_pitch, -1.0, 1.0)
-		var sh := Vector3(0.28, 1.5, 0.0)
-		var fwd := Vector3(0, sin(pa), -cos(pa))
-		gun.rotation = Vector3(pa, 0, 0)
-		gun.position = sh - hips.position + fwd * 0.3
-		cm.pose_arm("R", fwd, fwd)
-		cm.pose_arm("L", (fwd + Vector3(-0.25, -0.05, 0)).normalized(), (fwd + Vector3(0.1, 0.1, 0)).normalized())
-		head_pitch = clampf(aim_pitch, -0.8, 0.8) * -0.5
-	else:
-		gun.rotation = Vector3(0.0, 0.0, 0.9)
-		gun.position = Vector3(0.0, 0.5, 0.2)   # за спиной
+	# достать / убрать оружие: плавный переход между «за спиной на ремне» и «в плечо»
+	var draw_target := 1.0 if (aim_pose and aim_vis) else 0.0
+	draw_t = move_toward(draw_t, draw_target, delta / 0.45)
+	var dk := smoothstep(0.0, 1.0, draw_t)
+	var pa := clampf(aim_pitch, -1.0, 1.0)
+	var fwd := Vector3(0, sin(pa), -cos(pa))
+	# ремень: ружьё висит по диагонали на спине вдоль торса (следует за костью торса)
+	var torso := (cm.skeleton.global_transform * cm.skeleton.get_bone_global_pose(cm.skeleton.find_bone("Torso")).origin)
+	var torso_l := model.to_local(torso) - hips.position
+	var sling_pos := torso_l + Vector3(0.04, 0.0, 0.2)
+	var sling_basis := Basis.from_euler(Vector3(0.0, 0.0, 0.0)) * Basis(Vector3(0, 0, 1), -0.45) * Basis(Vector3(1, 0, 0), 1.2)
+	var aim_pos := Vector3(0.28, 1.5, 0.0) - hips.position + fwd * 0.3
+	var aim_basis := Basis(Vector3(1, 0, 0), pa)
+	gun.position = sling_pos.lerp(aim_pos, dk)
+	gun.basis = sling_basis.get_rotation_quaternion().slerp(aim_basis.get_rotation_quaternion(), dk)
+	if dk > 0.01:
+		# рука тянется за плечо к ружью, затем ружьё поднимается в плечо
+		var reach_back := Vector3(0.35, 0.85, 0.4).normalized()
+		var rd := reach_back.lerp(fwd, dk).normalized()
+		cm.pose_arm("R", rd, rd, minf(dk * 2.0, 1.0))
+		var ld := (fwd + Vector3(-0.25, -0.05, 0)).normalized()
+		cm.pose_arm("L", ld, (fwd + Vector3(0.1, 0.1, 0)).normalized(), clampf(dk * 2.0 - 0.6, 0.0, 1.0))
+		head_pitch = clampf(aim_pitch, -0.8, 0.8) * -0.5 * dk
 	if head_pitch != 0.0:
 		cm.tilt_head(head_pitch)
 	gun.visible = show_gun and not ragdoll and not dead

@@ -129,15 +129,15 @@ static func label3d(text: String, pos: Vector3, size := 64, color := Color.WHITE
 
 
 ## Синхронизатор свойств сущности (авторитет = владелец узла).
-static func make_sync(props: Array, interval: float) -> MultiplayerSynchronizer:
+static func make_sync(props: Array, interval: float, on_change := false, nm := "Sync") -> MultiplayerSynchronizer:
 	var s := MultiplayerSynchronizer.new()
-	s.name = "Sync"
+	s.name = nm
 	var cfg := SceneReplicationConfig.new()
 	for p in props:
 		var np := NodePath(".:" + str(p))
 		cfg.add_property(np)
 		cfg.property_set_spawn(np, true)
-		cfg.property_set_replication_mode(np, SceneReplicationConfig.REPLICATION_MODE_ALWAYS)
+		cfg.property_set_replication_mode(np, SceneReplicationConfig.REPLICATION_MODE_ON_CHANGE if on_change else SceneReplicationConfig.REPLICATION_MODE_ALWAYS)
 	s.replication_config = cfg
 	s.replication_interval = interval
 	return s
