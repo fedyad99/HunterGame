@@ -107,7 +107,7 @@ func _make_bushes() -> void:
 
 
 ## Визуал ягодников строит WorldBuilder (общая модель куста + ягоды).
-func build_bush_visuals(bush_mesh: Mesh) -> void:
+func build_bush_visuals(bush_mesh: Mesh, mesh_xf := Transform3D()) -> void:
 	var col := {"berries_blue": Color(0.14, 0.17, 0.45), "berries_red": Color(0.8, 0.08, 0.1), "berries_wolf": Color(0.06, 0.03, 0.06)}
 	var berry := SphereMesh.new()
 	berry.radius = 0.035
@@ -123,7 +123,7 @@ func build_bush_visuals(bush_mesh: Mesh) -> void:
 		add_child(root)
 		var mi := MeshInstance3D.new()
 		mi.mesh = bush_mesh
-		mi.scale = Vector3.ONE * 0.45
+		mi.transform = Transform3D(Basis().scaled(Vector3.ONE * 0.55), Vector3.ZERO) * mesh_xf
 		mi.visibility_range_end = 160.0
 		root.add_child(mi)
 		var mm := MultiMesh.new()
@@ -302,7 +302,7 @@ func _field_cut(it: Item) -> void:
 func _track_tex(kind: String, dung: bool) -> Texture2D:
 	var img := Image.create(64, 64, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
-	var c := Color(0.16, 0.11, 0.07, 0.85)
+	var c := Color(0.1, 0.065, 0.035, 1.0)
 	var blobs: Array = []
 	if dung:
 		for i in 7:
@@ -331,9 +331,17 @@ func _track_tex(kind: String, dung: bool) -> Texture2D:
 			var a := 0.0
 			for b in blobs:
 				var d: Vector2 = (Vector2(x, y) - b[0]) / Vector2(b[1], b[2])
-				a = maxf(a, clampf(1.4 - d.length(), 0.0, 1.0))
+				a = maxf(a, clampf((1.25 - d.length()) * 2.5, 0.0, 1.0))
+			# вокруг отпечатка — примятая земля, чтобы след читался на траве
+			var halo := 0.0
+			for b in blobs:
+				var d2: Vector2 = (Vector2(x, y) - b[0]) / (Vector2(b[1], b[2]) * 1.9)
+				halo = maxf(halo, clampf(1.2 - d2.length(), 0.0, 1.0))
+			var px := Color(0.34, 0.25, 0.15, 0.8 * halo)
 			if a > 0.0:
-				img.set_pixel(x, y, Color(c.r, c.g, c.b, c.a * a))
+				px = Color(c.r, c.g, c.b, maxf(c.a * a, px.a))
+			if px.a > 0.0:
+				img.set_pixel(x, y, px)
 	img.generate_mipmaps()
 	return ImageTexture.create_from_image(img)
 
@@ -350,6 +358,7 @@ func _mat_for(kind: String, dung: bool, blood: bool) -> Material:
 	if blood:
 		m.albedo_color = Color(1.6, 0.6, 0.5)
 	m.render_priority = 1
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR   # без мип-карт: издалека след не растворяется
 	_track_mat[key] = m
 	return m
 
@@ -364,9 +373,9 @@ func add_track(kind: String, pos: Vector3, yaw: float, who: String, blood: bool,
 	var h := TerrainGen.height_at(pos.x, pos.z)
 	var mi := MeshInstance3D.new()
 	var q := QuadMesh.new()
-	var sz := {"rabbit": 0.14, "deer": 0.16, "boar": 0.18, "bear": 0.32}.get(kind, 0.2) as float
+	var sz := {"rabbit": 0.34, "deer": 0.42, "boar": 0.45, "bear": 0.62}.get(kind, 0.42) as float
 	if dung:
-		sz = 0.22
+		sz = 0.42
 	q.size = Vector2(sz, sz)
 	q.orientation = PlaneMesh.FACE_Y
 	mi.mesh = q
@@ -376,7 +385,7 @@ func add_track(kind: String, pos: Vector3, yaw: float, who: String, blood: bool,
 	add_child(mi)
 	var side := 0.08 if (tracks.size() % 2 == 0) else -0.08
 	var b := Basis(Vector3.UP, yaw)
-	mi.global_transform = Transform3D(b, Vector3(pos.x, h + 0.025, pos.z) + b * Vector3(side if not dung else 0.0, 0, 0))
+	mi.global_transform = Transform3D(b, Vector3(pos.x, h + 0.07, pos.z) + b * Vector3(side if not dung else 0.0, 0, 0))
 	tracks.append({"pos": mi.global_position, "yaw": yaw, "kind": kind, "t": Time.get_ticks_msec() * 0.001,
 		"who": who, "blood": blood, "dung": dung, "node": mi})
 	if tracks.size() > TRACK_MAX:

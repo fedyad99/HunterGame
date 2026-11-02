@@ -63,10 +63,21 @@ static func body(rv: RV, v: Node3D) -> void:
 			for yy in [2.0, 2.65]:
 				v.add_child(MU.box(Vector3(0.14, 0.05, sl * 0.62), dark, Vector3(e * 1.15, yy, sc)))
 	# полосы
-	v.add_child(MU.box(Vector3(2.44, 0.18, lz + 0.02), stripe, Vector3(0, 1.55, cz)))
-	v.add_child(MU.box(Vector3(2.44, 0.06, lz + 0.02), orange, Vector3(0, 1.72, cz)))
-	# юбка кузова и подножки-рамки
-	v.add_child(MU.box(Vector3(2.46, 0.3, lz + 0.04), dark, Vector3(0, 1.0, cz)))
+	# (только по бортам: сплошной брусок проходил сквозь салон и закрывал мебель)
+	var z_lo := cz - lz * 0.5
+	var z_hi := cz + lz * 0.5
+	for e in [-1, 1]:
+		# справа (−X) — дверной проём z 0.3..1.4, полосы его обходят
+		var segs: Array = [[z_lo, z_hi]] if e > 0 else [[z_lo, 0.3], [1.4, z_hi]]
+		for sg in segs:
+			var ln: float = sg[1] - sg[0]
+			var zc: float = (sg[0] + sg[1]) * 0.5
+			v.add_child(MU.box(Vector3(0.04, 0.18, ln), stripe, Vector3(e * 1.21, 1.55, zc)))
+			v.add_child(MU.box(Vector3(0.04, 0.06, ln), orange, Vector3(e * 1.21, 1.72, zc)))
+		# юбка кузова
+		v.add_child(MU.box(Vector3(0.06, 0.3, lz + 0.04), dark, Vector3(e * 1.2, 1.0, cz)))
+	for ez in [cz + lz * 0.5, cz - lz * 0.5]:
+		v.add_child(MU.box(Vector3(2.46, 0.3, 0.06), dark, Vector3(0, 1.0, ez)))
 	# крыша
 	rv._part(v, Vector3(2.4, 0.1, lz), Vector3(0, RV.ROOF_Y, cz), cream)
 	for e in [-1, 1]:

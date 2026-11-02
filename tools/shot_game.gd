@@ -67,7 +67,7 @@ func _physics_process(_d: float) -> bool:
 				w.req_sit(0)
 			"forest", "animals", "scope", "tracks", "berries", "fire":
 				w.game_time = 10.5
-				var c := _forest_spot(w)
+				var c := _forest_spot(w, mode in ["animals", "scope", "berries"])
 				p.global_position = c + Vector3(0, 1.0, 0)
 				st_pos = c
 				if mode == "scope":
@@ -113,7 +113,7 @@ func _physics_process(_d: float) -> bool:
 		var fwd := Vector3(0, 0, -1)
 		var right := Vector3(1, 0, 0)
 		var kinds := ["bear", "deer", "boar", "deer", "rabbit"] if mode == "animals" else ["deer"]
-		var dist := 10.0 if mode == "animals" else 45.0
+		var dist := 10.0 if mode == "animals" else 24.0
 		var used := {}
 		for i in kinds.size():
 			for c in w.entities.get_children():
@@ -127,7 +127,8 @@ func _physics_process(_d: float) -> bool:
 					c.state = "idle"
 					c.yaw = c.rotation.y
 					break
-		p.global_position = st_pos + Vector3(0, 0.2, 0)
+		if f < 12:
+			p.global_position = st_pos + Vector3(0, 0.2, 0)
 		_look(p, st_pos + fwd * dist + Vector3(0, 0.6, 0) - (right * 3.5 if mode == "animals" else Vector3.ZERO))
 		if mode == "scope" and f > 30:
 			Input.action_press("aim")
@@ -135,16 +136,22 @@ func _physics_process(_d: float) -> bool:
 		p.cam_yaw = 0.8
 		p.cam_pitch = 0.02
 	if mode == "tracks" and f > 8:
-		if f == 10:
+		if f == 40:
 			for k in 8:
-				w.wild.add_track("deer", st_pos + Vector3(1.0 + k * 0.7, 0, -2.0 - k * 0.9), 0.6, "shotdeer", k > 4, false)
-			w.wild.add_track("boar", st_pos + Vector3(-1.5, 0, -2.5), 0.0, "shotboar", false, true)
+				w.wild.add_track("deer", st_pos + Vector3(0.6 + k * 0.35, 0, 0.6 - k * 0.6), 0.5, "shotdeer", k > 4, false)
+			w.wild.add_track("boar", st_pos + Vector3(-1.0, 0, -0.8), 0.0, "shotboar", false, true)
+			for t in w.wild.tracks.slice(-3):
+				var nd: MeshInstance3D = t.node
+				nd.scale = Vector3.ONE * float(OS.get_environment("TRS") if OS.get_environment("TRS") != "" else "1")
+				print("tr ", nd.global_position, " vis=", nd.is_visible_in_tree(), " sz=", (nd.mesh as QuadMesh).size, " h=", TerrainGen.height_at(nd.global_position.x, nd.global_position.z), " inside=", nd.is_inside_tree(), " tr=", nd.transparency)
+			print("tracks=", w.wild.tracks.size(), " cam=", root.get_viewport().get_camera_3d().global_position if root.get_viewport().get_camera_3d() else null, " st=", st_pos)
 			var tr: Dictionary = w.wild.track_near(st_pos + Vector3(1.0, 0, -2.0), 2.0)
 			if not tr.is_empty():
 				w.wild.inspect(tr)
-		p.global_position = st_pos + Vector3(0, 0.2, 1.5)
-		p.cam_yaw = 0.0
-		p.cam_pitch = -0.6
+		if f < 12:
+			p.global_position = st_pos + Vector3(0, 0.2, 1.5)
+		p.cam_yaw = 0.3
+		p.cam_pitch = -0.85
 	if mode == "berries" and f > 8:
 		var bi := 0
 		var best := 1e9
@@ -154,7 +161,8 @@ func _physics_process(_d: float) -> bool:
 				best = d
 				bi = k
 		var bp: Vector3 = w.wild.bushes[bi].pos
-		p.global_position = bp + Vector3(2.2, 0.3, 2.2)
+		if f < 12:
+			p.global_position = bp + Vector3(2.2, 0.3, 2.2)
 		_look(p, bp + Vector3(0, 0.2, 0))
 		p.cam_pitch = -0.35
 		if f == 10:
@@ -172,14 +180,17 @@ func _physics_process(_d: float) -> bool:
 		if fire:
 			fire.lit = true
 			fire.fuel = 300.0
-		p.global_position = st_pos + Vector3(0.6, 0.2, 1.0)
+		if f < 12:
+			p.global_position = st_pos + Vector3(0.6, 0.2, 1.0)
 		_look(p, st_pos + Vector3(0, 0.3, -3.0))
 		p.cam_pitch = -0.2
 	if mode == "swamp" and f > 8:
-		p.global_position = st_pos + Vector3(9.0, 1.0, 6.0)
-		_look(p, st_pos)
-		p.cam_pitch = -0.12
-		if f > 20 and f < 120:
+		if f < 30:
+			p.global_position = rv.global_position + Vector3(11.0, 0.0, 7.0)
+			p.global_position.y = TerrainGen.height_at(p.global_position.x, p.global_position.z) + 1.0
+		_look(p, rv.global_position)
+		p.cam_pitch = -0.1
+		if f > 20 and f < 120 and false:
 			rv.seats = [p.peer_id + 777, 0, 0, 0, 0, 0, 0, 0]
 			rv.set_input(1.0, 0.0, 0.0)
 			rv.gear = 2
@@ -200,6 +211,10 @@ func _physics_process(_d: float) -> bool:
 		p.warmth = 55.0
 		p.wetness = 40.0
 		p.hp = 70.0
+	if f == shot_f - 1 and mode == "tracks":
+		for t in w.wild.tracks.slice(-3):
+			var nd: MeshInstance3D = t.node
+			print("late ", is_instance_valid(nd), " ", nd.global_position if is_instance_valid(nd) else null, " tr=", nd.transparency if is_instance_valid(nd) else -1.0)
 	if f == shot_f:
 		var img := root.get_texture().get_image()
 		img.save_png(out)
@@ -215,7 +230,8 @@ func _look(p, target: Vector3) -> void:
 
 
 ## Ровное место в густом лесу.
-func _forest_spot(w) -> Vector3:
+func _forest_spot(w, open := false) -> Vector3:
+	seed(11)
 	var best := Vector3.ZERO
 	var bd := -9.0
 	for i in 3000:
@@ -226,6 +242,8 @@ func _forest_spot(w) -> Vector3:
 			continue
 		if TerrainGen.road_query(Vector2(x, z)).x < 12.0:
 			continue
+		if open:
+			d = -d
 		if d > bd and d < 0.25:
 			bd = d
 			best = Vector3(x, 0, z)

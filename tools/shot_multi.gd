@@ -37,6 +37,12 @@ func _build_steps() -> void:
 		["ext_rear", func(w, rv, p): _set_cam(rv, Vector3(-5.0, 2.8, -13), Vector3(0, 2.2, -4), 60)],
 		["salon_front", func(w, rv, p): _set_cam(rv, Vector3(0.0, 2.35, -6.2), Vector3(0, 1.9, -1.0), 80)],
 		["salon_rear", func(w, rv, p): _set_cam(rv, Vector3(0.0, 2.3, 0.6), Vector3(0.0, 1.7, -5.0), 80)],
+		["dinette", func(w, rv, p): _set_cam(rv, Vector3(-0.7, 2.45, -1.0), Vector3(0.3, 1.4, -3.3), 80)],
+		["dinette_side", func(w, rv, p): _set_cam(rv, Vector3(-0.85, 2.4, -4.7), Vector3(0.4, 1.3, -2.8), 80)],
+		["glovebox_map", func(w, rv, p):
+			if f_once("gm"):
+				w.hud.open_map(p)
+			_set_cam(rv, Vector3(0.15, 2.55, 1.55), Vector3(0.55, 2.0, 3.1), 75)],
 		["kitchen", func(w, rv, p): _set_cam(rv, Vector3(0.7, 2.2, -2.0), Vector3(-0.8, 1.6, -3.8), 75)],
 		["armchairs", func(w, rv, p): _set_cam(rv, Vector3(0.1, 2.35, 0.5), Vector3(0.5, 1.4, -1.3), 75)],
 		["stove_lit", func(w, rv, p):

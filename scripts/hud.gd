@@ -929,7 +929,12 @@ func open_map(p: Player) -> void:
 				var op := _map_pos(o.pos)
 				canvas.draw_rect(Rect2(op - Vector2(7, 7), Vector2(14, 14)), Color(0.25, 0.15, 0.08))
 				canvas.draw_rect(Rect2(op - Vector2(5, 5), Vector2(10, 10)), Color(0.9, 0.75, 0.4))
-				canvas.draw_string(font, op + Vector2(10, -8), T.t(o.key), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.2, 0.12, 0.05))
+				var txt := T.t(o.key)
+				var tw := font.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+				var tp := op + Vector2(10, -8)
+				if tp.x + tw > MAP_PX - 6:
+					tp.x = op.x - 10 - tw
+				canvas.draw_string(font, tp, txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.2, 0.12, 0.05))
 			# дом и игроки
 			if world.rv:
 				var rp := _map_pos(Vector2(world.rv.global_position.x, world.rv.global_position.z))
@@ -949,7 +954,7 @@ func open_map(p: Player) -> void:
 			var cr := Vector2(MAP_PX - 40, 44)
 			canvas.draw_line(cr + Vector2(0, 22), cr + Vector2(0, -22), Color(0.25, 0.15, 0.08), 2.0)
 			canvas.draw_line(cr + Vector2(-16, 0), cr + Vector2(16, 0), Color(0.25, 0.15, 0.08), 1.5)
-			canvas.draw_string(font, cr + Vector2(-5, -26), T.t("dir_N"), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.25, 0.15, 0.08)))
+			canvas.draw_string(font, cr + Vector2(-6, -26), T.t("map_north"), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.25, 0.15, 0.08)))
 		# легенда
 		var leg := VBoxContainer.new()
 		leg.add_theme_constant_override("separation", 8)

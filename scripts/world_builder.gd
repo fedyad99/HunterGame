@@ -340,12 +340,12 @@ static func _forest(w: Node3D) -> void:
 		elif dens > 0.0:
 			model = "Fern_1" if r < 0.45 else ("Bush_Large" if r < 0.7 else ("Bush_Small" if r < 0.85 else "Plant_1"))
 			if model == "Fern_1":
-				s = rng.randf_range(0.5, 0.9)
+				s = rng.randf_range(0.11, 0.18)   # модель папоротника огромная (9 м)
 			elif model.begins_with("Bush"):
-				s = rng.randf_range(0.35, 0.6)
+				s = rng.randf_range(0.5, 0.9)
 		else:
 			model = "Flower_3_Group" if r < 0.25 else ("Flower_4_Group" if r < 0.45 else ("Grass_Common_Tall" if r < 0.8 else "Clover_1"))
-			s = rng.randf_range(0.35, 0.7)
+			s = rng.randf_range(0.25, 0.45)
 		if not under.has(model):
 			under[model] = []
 		under[model].append(Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3.ONE * s), Vector3(x, h - 0.05, z)))
@@ -381,9 +381,9 @@ static func _forest(w: Node3D) -> void:
 	for m in rocks:
 		_chunked(w, "R_" + m, m, rocks[m], 320.0)
 	# ягодники
-	var bush := nature_mesh("Bush_Common")
+	var bush := nature_mesh("Bush_Large")
 	if bush[0] and w.get("wild"):
-		w.wild.build_bush_visuals(bush[0])
+		w.wild.build_bush_visuals(bush[0], bush[1])
 
 
 # ---------------------------------------------------------------- Фактории

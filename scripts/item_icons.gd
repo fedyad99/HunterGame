@@ -83,6 +83,8 @@ func _run() -> void:
 		var v := ItemsDB.build_visual(kind)
 		holder.add_child(v)
 		v.rotation_degrees = Vector3(0, 35, 0)
+		if kind.begins_with("weapon_") or kind.begins_with("att_") or kind in ["knife", "wrench", "hammer"]:
+			v.rotation_degrees = Vector3(0, 95, 0)   # длинные вещи — боком к камере
 		var box := [AABB(), false]
 		_bounds(v, Transform3D.IDENTITY, box)
 		var bb: AABB = box[0]
